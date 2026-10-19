@@ -350,7 +350,7 @@ data/
 - 环境：`windows-latest` + Python 3.12 x64（PyInstaller 不能跨平台交叉编译，必须 Windows）；
 - 步骤：装依赖（含 `red-black-tree-mod` sdist 解包失败的兜底）→ 校验 import →
   跑 `pytest` → 跑 `smoke.py` → PyInstaller → 组装目录 → zip → Artifacts / Release；
-- 产物：`表格汇总助手-vX.Y.Z-windows-x64.zip`，解压双击「启动.bat」即用。
+- 产物：`TableSummaryAssistant-vX.Y.Z-windows-x64.zip`，解压双击「启动.bat」即用。
 
 ## 15. 后续可扩展
 

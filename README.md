@@ -9,7 +9,7 @@
 不想碰 Python 的话，直接用打包好的免安装版：
 
 1. 打开 **<https://github.com/lirunwen/table-summary-assistant/releases/latest>**
-2. 在 **Assets** 里下载 `表格汇总助手-v*-windows-x64.zip`
+2. 在 **Assets** 里下载 `TableSummaryAssistant-v*-windows-x64.zip`
 3. 解压到任意目录，双击 **「启动.bat」**，浏览器会自动打开工作台
 
 目标电脑**不需要安装 Python，也不需要管理员权限**。全程离线，数据只落在解压目录的 `data\` 文件夹里。删除整个文件夹即完成卸载。
@@ -73,7 +73,7 @@ packaging\build_windows.bat
 ```
 
 脚本会自动建虚拟环境、装依赖、跑回归测试、打包、组装并压缩，最终产出
-`dist\表格汇总助手-vX.Y.Z-windows-x64.zip`，直接发给同事即可。
+`dist\TableSummaryAssistant-vX.Y.Z-windows-x64.zip`，直接发给同事即可。
 
 ### 方式 C：源码运行（开发 / 内网 Python 环境）
 

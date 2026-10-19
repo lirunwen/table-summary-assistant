@@ -105,11 +105,16 @@ jobs:
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item "dist/HuiYi/*" $stage -Recurse -Force
           Copy-Item "packaging/launcher.bat" "$stage/启动.bat" -Force
+          # 再放一份 ASCII 名字的启动器：某些解压工具（老版 WinRAR / 7-Zip 配置了
+          # 非 UTF-8 文件名）会把中文名解成乱码，留着这个总能双击打开。
+          Copy-Item "packaging/launcher.bat" "$stage/start.bat" -Force
           Copy-Item "packaging/使用说明-打包版.txt" "$stage/使用说明.txt" -Force
           if (Test-Path "LICENSE") { Copy-Item "LICENSE" "$stage/LICENSE.txt" -Force }
           if (Test-Path "samples") { Copy-Item "samples" "$stage/samples" -Recurse -Force }
 
-          $zip = "dist/表格汇总助手-v$ver-windows-x64.zip"
+          # zip 名必须全 ASCII：softprops/action-gh-release 会把文件名里的非 ASCII
+          # 字符直接删掉，中文前缀会导致资产变成 "-v0.2.0-windows-x64.zip"。
+          $zip = "dist/TableSummaryAssistant-v$ver-windows-x64.zip"
           Compress-Archive -Path $stage -DestinationPath $zip -Force
           "ZIP_NAME=$(Split-Path $zip -Leaf)" >> $env:GITHUB_ENV
 
@@ -135,9 +140,9 @@ jobs:
           body: |
             ## 下载
 
-            点下方 **Assets** 里的 `表格汇总助手-v*-windows-x64.zip`（${{ env.ZIP_MB }} MB）。
+            点下方 **Assets** 里的 `TableSummaryAssistant-v*-windows-x64.zip`（${{ env.ZIP_MB }} MB）。
 
-            解压后双击「启动.bat」即可，**目标电脑不需要安装 Python，也不需要管理员权限**。
+            解压后双击「启动.bat」（或 `start.bat`）即可，**目标电脑不需要安装 Python，也不需要管理员权限**。
 
             ## 适用环境
 

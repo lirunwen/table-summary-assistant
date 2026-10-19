@@ -7,7 +7,7 @@ title 表格汇总助手 · 构建 Windows 离线安装包
 echo.
 echo  ============================================================
 echo   构建 Windows 离线安装包（PyInstaller 目录版 + zip）
-echo   产物：dist\表格汇总助手-vX.Y.Z-windows-x64.zip
+echo   产物：dist\TableSummaryAssistant-vX.Y.Z-windows-x64.zip
 echo  ============================================================
 echo.
 
@@ -95,11 +95,13 @@ if exist "dist\stage" rmdir /S /Q "dist\stage"
 mkdir "%STAGE%"
 xcopy "dist\HuiYi\*" "%STAGE%\" /E /I /H /Y >nul
 copy /Y "packaging\launcher.bat" "%STAGE%\启动.bat" >nul
+rem 再放一份 ASCII 名字的启动器，防止解压工具把中文名解成乱码后找不到入口
+copy /Y "packaging\launcher.bat" "%STAGE%\start.bat" >nul
 copy /Y "packaging\使用说明-打包版.txt" "%STAGE%\使用说明.txt" >nul
 if exist "LICENSE" copy /Y "LICENSE" "%STAGE%\LICENSE.txt" >nul
 if exist "samples" xcopy "samples" "%STAGE%\samples\" /E /I /Y >nul
 
-set ZIP=dist\表格汇总助手-v%APPVER%-windows-x64.zip
+set ZIP=dist\TableSummaryAssistant-v%APPVER%-windows-x64.zip
 rem 优先用系统自带的 bsdtar（Win10 1803+），对中文路径更稳
 tar -a -c -f "%ZIP%" -C "dist\stage" "表格汇总助手"
 if errorlevel 1 (
