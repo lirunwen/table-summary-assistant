@@ -7,8 +7,20 @@ import shutil
 import sys
 from pathlib import Path
 
+# Windows 控制台在英文系统上默认 cp1252，print 中文会抛 UnicodeEncodeError
+# 导致冒烟测试以「编码错误」而非「真实断言失败」退出。这里只放宽错误策略。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except Exception:
+        pass
+
 ROOT = Path(__file__).resolve().parent.parent
-DATA = ROOT / "data" / "_smoke"
+# 允许外部指定数据目录（CI 用临时目录），但绝不清空调用方给的真实数据目录：
+# 目录名里没有 smoke 时，就往下再建一层 _smoke。
+DATA = Path(os.environ.get("HUIYI_DATA_DIR") or (ROOT / "data" / "_smoke")).resolve()
+if "smoke" not in DATA.name.lower():
+    DATA = DATA / "_smoke"
 shutil.rmtree(DATA, ignore_errors=True)
 os.environ["HUIYI_DATA_DIR"] = str(DATA)
 sys.path.insert(0, str(ROOT))

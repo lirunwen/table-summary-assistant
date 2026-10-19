@@ -66,6 +66,30 @@ def pick_port(host: str, preferred: int) -> tuple[int, bool]:
     raise SystemExit(f"端口 {preferred} 及后续端口都被占用，请用 --port 指定其他端口。")
 
 
+def _safe_console() -> None:
+    """让中文输出在任何 Windows 控制台下都不会把程序打崩。
+
+    Windows 控制台默认跟随本地代码页：中文系统是 cp936（能编码中文），
+    英文系统是 cp1252（编码中文直接 UnicodeEncodeError，服务还没起来就退出）。
+    这里按「当前编码能不能编码中文」分流：
+      - 能 → 保留原编码，只把错误策略换成 replace（不乱码）
+      - 不能 → 切到 UTF-8（Windows Terminal 正常显示），仍然 replace 兜底
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        try:
+            encoding = stream.encoding or "ascii"
+            try:
+                "中文".encode(encoding)
+            except (UnicodeEncodeError, LookupError):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            else:
+                stream.reconfigure(errors="replace")
+        except Exception:
+            pass
+
+
 def banner(url: str):
     line = "─" * 48
     print(f"\n  {line}")
@@ -86,10 +110,7 @@ def main():
     parser.add_argument("--debug", action="store_true", help="开发模式（Flask 自动重载）")
     args = parser.parse_args()
 
-    try:
-        sys.stdout.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
+    _safe_console()
     setup_logging()
     db.init_db()
 
