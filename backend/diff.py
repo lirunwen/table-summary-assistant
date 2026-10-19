@@ -105,7 +105,7 @@ def _key_index(side: dict, keys: list[str]) -> list[int]:
     return indices
 
 
-def _row_map(rows: list[list[Any]], indices: list[int], headers: list[str]) -> tuple[dict, int, int]:
+def _row_map(rows: list[list[Any]], indices: list[int]) -> tuple[dict, int, int]:
     mapping = {}
     duplicate = 0
     skipped = 0
@@ -139,8 +139,8 @@ def compare(left_spec: dict, right_spec: dict, keys: list[str]) -> dict:
     common_cols = [h for h in left_common if h in right_common]
     compare_cols = [h for h in common_cols if h not in keys]
 
-    lmap, ldup, lskip = _row_map(left["rows"], left_keys, left["headers"])
-    rmap, rdup, rskip = _row_map(right["rows"], right_keys, right["headers"])
+    lmap, ldup, lskip = _row_map(left["rows"], left_keys)
+    rmap, rdup, rskip = _row_map(right["rows"], right_keys)
     lindex = {h: i for i, h in enumerate(left["headers"])}
     rindex = {h: i for i, h in enumerate(right["headers"])}
 

@@ -28,6 +28,11 @@ HEADER_FILL = PatternFill("solid", fgColor=BRAND)
 HEADER_FONT = Font(name="微软雅黑", size=10.5, bold=True, color="FFFFFF")
 BODY_FONT = Font(name="微软雅黑", size=10.5, color=INK)
 ZEBRA_FILL = PatternFill("solid", fgColor=ZEBRA)
+# 样式对象做成模块级常量：以前每写一个单元格就 new 一个 Alignment，
+# 5 万行 × 6 列就是 30 万个对象，白占内存也拖慢写入。
+HEADER_ALIGN = Alignment(horizontal="left", vertical="center")
+BODY_ALIGN = Alignment(vertical="center", wrap_text=False)
+WRAP_ALIGN = Alignment(vertical="top", wrap_text=True)
 
 
 def _safe_sheet_name(name: str) -> str:
@@ -42,12 +47,15 @@ def _as_cell_value(value: Any, col_type: str):
         ok, parsed = parse_date_value(value)
         if ok and isinstance(parsed, (dt.date, dt.datetime)):
             return parsed
+        # 解析不成日期：数字原样保留，别把 5 位工号 10001 变成文本 "10001"
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value
         return display_value(value)
     if col_type == "number":
         num = coerce_number(value)
         return num if num is not None else display_value(value)
     if col_type == "text":
-        return display_value(value)
+        return value if isinstance(value, str) else display_value(value)
     # auto：保留原生数字 / 日期
     if isinstance(value, (dt.date, dt.datetime, int, float, bool)):
         return value
@@ -118,10 +126,11 @@ def _blank_workbook(output: Path, headers: list[str], rows: list[list[Any]],
         cell.fill = HEADER_FILL
         cell.font = HEADER_FONT
         cell.border = BORDER
-        cell.alignment = Alignment(horizontal="left", vertical="center")
+        cell.alignment = HEADER_ALIGN
     ws.row_dimensions[1].height = 30
 
     for r, row in enumerate(rows, start=2):
+        zebra = ZEBRA_FILL if r % 2 == 0 else None
         for c, value in enumerate(row, start=1):
             col_type = types[c - 1] if c - 1 < len(types) else "auto"
             cell_value = _as_cell_value(value, col_type)
@@ -129,10 +138,10 @@ def _blank_workbook(output: Path, headers: list[str], rows: list[list[Any]],
             _set_safe(cell, cell_value)
             cell.font = BODY_FONT
             cell.border = BORDER
-            cell.alignment = Alignment(vertical="center", wrap_text=False)
+            cell.alignment = BODY_ALIGN
             _apply_number_format(cell, col_type, cell_value, _is_percent_source(value))
-            if r % 2 == 0:
-                cell.fill = ZEBRA_FILL
+            if zebra is not None:
+                cell.fill = zebra
 
     for i, width in enumerate(_auto_widths(headers, rows, widths_conf), start=1):
         ws.column_dimensions[get_column_letter(i)].width = width
@@ -160,12 +169,12 @@ def _blank_workbook(output: Path, headers: list[str], rows: list[list[Any]],
     for i, (k, v) in enumerate(info_rows, start=3):
         info.cell(row=i, column=1, value=k).font = Font(name="微软雅黑", size=10, bold=True, color="55635D")
         info.cell(row=i, column=2, value=v).font = Font(name="微软雅黑", size=10, color=INK)
-        info.cell(row=i, column=2).alignment = Alignment(vertical="top", wrap_text=True)
+        info.cell(row=i, column=2).alignment = WRAP_ALIGN
     if result.get("warnings"):
         row = len(info_rows) + 4
         info.cell(row=row, column=1, value="提示").font = Font(name="微软雅黑", size=10, bold=True, color="A9761F")
         info.cell(row=row, column=2, value="\n".join(result["warnings"])).font = Font(name="微软雅黑", size=10, color="6B5A33")
-        info.cell(row=row, column=2).alignment = Alignment(vertical="top", wrap_text=True)
+        info.cell(row=row, column=2).alignment = WRAP_ALIGN
 
     wb.save(output)
     return {"sheet": sheet_name, "header_row": 1, "data_start": 2, "headers": headers,
@@ -197,7 +206,11 @@ def _set_safe(cell, value):
     所以先 lstrip 再判断；命中时用 quotePrefix 强制文本（比改 data_type 稳）。
     """
     cell.value = value
-    if isinstance(value, str):
+    if isinstance(value, str) and value:
+        # 快路径：首字符既不是公式前缀也不是空白，就不可能被 Excel 当公式，
+        # 不必为每个单元格都做一次 lstrip。
+        if value[0] not in "=+-@ \t\r\n":
+            return
         probe = value.lstrip(" \t\r\n")
         if probe.startswith(("=", "+", "-", "@")):
             try:

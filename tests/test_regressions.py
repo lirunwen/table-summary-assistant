@@ -328,3 +328,122 @@ def test_preview_reports_empty_columns(client):
     assert data["ok"]
     assert data["empty_columns"] == ["公式列"]
     assert data["scanned_rows"] == 2
+
+
+# --------------------------------------------------------------------------
+# 10. 五位数字不要再被当成 Excel 日期序列号
+#     以前 工号 10001 会被写成 1927-05-19，整列日期静默错掉。
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("raw", [10001, 12345, 99999, "10001", "12345"])
+def test_five_digit_number_is_not_a_date(raw):
+    ok, _ = parse_date_value(raw)
+    assert not ok, f"{raw!r} 不应被解释成日期"
+
+
+def test_raw_serial_number_is_left_alone():
+    """裸数字不猜日期：46000 可能是 2025 年的序列号，也可能是真实编号，
+    没有任何本地信息能区分，按「歧义不猜」原则原样保留。"""
+    ok, value = parse_date_value(46000)
+    assert not ok and value == 46000
+
+
+def test_date_typed_column_keeps_five_digit_ids(workdir):
+    """列类型选了「日期」，源值是 5 位工号时，写出来必须还是工号本身。"""
+    config = {"target": {"kind": "blank", "sheet": "汇总", "header_row": 1,
+                         "write_mode": "replace",
+                         "columns": [{"key": "c0", "name": "工号", "type": "date",
+                                      "included": True, "template_col": 0}]}}
+    result = {"headers": ["工号"], "rows": [[10001], [12345]],
+              "stats": {"rows": 2, "empty_cells": 0}, "sources": [], "warnings": []}
+    out = workdir / "out.xlsx"
+    writer._blank_workbook(out, ["工号"], [[10001], [12345]], config, result, "t")
+
+    ws = load_workbook(out).active
+    assert ws.cell(row=2, column=1).value == 10001
+    assert ws.cell(row=3, column=1).value == 12345
+
+
+# --------------------------------------------------------------------------
+# 11. 欧式数字：以前 "1.234,56" 被读成 1.23456（差 1000 倍，静默）
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("raw,expected", [
+    ("1.234,56", 1234.56),        # 德语 / 法语区
+    ("1.234", 1.234),             # 只有点：是小数点
+    ("1,234", 1234),              # 只有逗号且后三位：千分位
+    ("1,234,567", 1234567),
+    ("1,23", 1.23),               # 只有逗号且后两位：小数点
+    ("12,5%", 0.125),
+    ("(100)", -100),              # 会计负数
+    ("12 345", 12345),            # 空格千分位
+    ("1 234,56", 1234.56),
+    ("50%", 0.5),
+])
+def test_coerce_number_locales(raw, expected):
+    assert coerce_number(raw) == expected
+
+
+# --------------------------------------------------------------------------
+# 12. 浮点键精度：0.1+0.2 与 0.3 必须归一成同一个关联键
+# --------------------------------------------------------------------------
+def test_norm_key_float_precision():
+    from backend.utils import norm_key
+
+    assert norm_key(0.1 + 0.2) == norm_key(0.3)
+    assert norm_key(1.0) == norm_key(1)
+    assert norm_key(float("nan")) == ""
+
+
+# --------------------------------------------------------------------------
+# 13. 解析缓存：同一个表重复读只解析一次，文件改动后自动失效
+# --------------------------------------------------------------------------
+def test_read_cache_hits_and_invalidates(workdir, monkeypatch):
+    path = workdir / "c.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["工号", "姓名"])
+    for i in range(50):
+        ws.append([f"A{i:03d}", f"人{i}"])
+    wb.save(path)
+
+    source = {"id": "s_x", "name": "c.xlsx", "path": str(path)}
+    table = {"path": str(path), "kind": "excel", "sheet": "Sheet",
+             "header_row": 1, "headers": ["工号", "姓名"]}
+
+    readers.clear_table_cache()
+    calls = {"n": 0}
+    real = readers.read_excel_grids
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(readers, "read_excel_grids", counting)
+
+    first = readers.read_table_data_cached(source, table)
+    second = readers.read_table_data_cached(source, table)
+    assert calls["n"] == 1, "第二次读取应命中缓存"
+    assert first[0] == second[0] and len(first[1]) == len(second[1]) == 50
+
+    # 同一个文件被改写（mtime/size 变化）后必须重新解析
+    ws.append(["A999", "新来的人"])
+    wb.save(path)
+    third = readers.read_table_data_cached(source, table)
+    assert calls["n"] == 2, "文件改了应重新解析"
+    assert len(third[1]) == 51
+
+
+# --------------------------------------------------------------------------
+# 14. 安全头：CSP 必须存在，且不允许内联脚本
+# --------------------------------------------------------------------------
+def test_csp_header_is_set(client):
+    resp = client.get("/")
+    csp = resp.headers.get("Content-Security-Policy", "")
+    assert "default-src 'self'" in csp
+    assert "script-src 'self'" in csp
+    assert "'unsafe-inline'" not in csp.split("style-src")[0]
+
+
+def test_index_has_no_inline_script(client):
+    html = client.get("/").get_data(as_text=True)
+    assert "<script>" not in html.replace("<script src=", "")
+    assert "onclick=" not in html
