@@ -122,8 +122,14 @@ def norm_key(value: Any) -> str:
         return ""
     if isinstance(value, bool):
         return "true" if value else "false"
-    if isinstance(value, float) and value.is_integer():
-        value = int(value)
+    if isinstance(value, float):
+        if value != value:                      # NaN 归一为空
+            return ""
+        if value.is_integer():
+            value = int(value)
+        else:
+            # 浮点误差会让 0.1+0.2 与 0.3 归一成不同字符串，关联键就漏匹配了
+            value = round(value, 10)
     if isinstance(value, dt.datetime):
         if value.hour == 0 and value.minute == 0 and value.second == 0:
             value = value.date()
@@ -242,13 +248,15 @@ def parse_date_value(value: Any) -> tuple[bool, Any]:
             return True, parsed
         except ValueError:
             continue
-    # Excel 序列号（1900 日期系统）
-    if re.fullmatch(r"\d{5}(\.\d+)?", text):
-        try:
-            base = dt.datetime(1899, 12, 30)
-            return True, (base + dt.timedelta(days=float(text))).date()
-        except Exception:
-            pass
+    # 纯数字**不再**猜测成 Excel 日期序列号。
+    #
+    # 以前对任何 5 位数字都做 (1899-12-30 + n) 换算，于是工号 10001 被写成
+    # 1927-05-19：整列数据静默错掉，而且没人会发现。区间限制救不了这件事——
+    # 46000 既可能是 2025 年的日期，也可能是真实的编号，没有任何本地信息
+    # 能区分。这与本项目「歧义日期不猜」的原则一致：宁可原样保留。
+    #
+    # 真正的 Excel 日期单元格在 openpyxl 里本来就会读成 datetime（走上面的分支），
+    # 根本不会以裸数字形式到这里，所以去掉这条推断不影响正常的日期列。
     return False, value
 
 
@@ -263,17 +271,43 @@ def coerce_number(value: Any):
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return value
     text = str(value).strip()
-    is_percent = text.endswith("%")
-    text = text.replace(",", "").replace("，", "")
-    text = re.sub(r"[¥￥$元]\s*", "", text)
-    text = text.replace("%", "").strip()
+    if not text:
+        return None
+    is_percent = "%" in text or "％" in text
+    # 全角标点先归一到半角，否则 "1，234" 这种中文输入法的千分位会解析失败
+    text = text.replace("，", ",").replace("．", ".").replace("。", ".")
+    text = re.sub(r"[¥￥$€£元%％]", "", text)
+    text = text.replace("\u00a0", "").replace("\u2009", "").replace(" ", "").replace("_", "")
+
+    # 会计格式的负数：(100) / (1,234.56)
+    negative = False
+    if len(text) >= 2 and text.startswith("(") and text.endswith(")"):
+        negative = True
+        text = text[1:-1]
+
+    # 小数点与千分位：以前是把逗号一律删掉，于是欧式的 "1.234,56"
+    # 被读成 1.23456（差 1000 倍，静默）。这里按分隔符位置判断。
+    if "." in text and "," in text:
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "").replace(",", ".")     # 1.234,56 → 1234.56
+        else:
+            text = text.replace(",", "")                        # 1,234.56 → 1234.56
+    elif "," in text:
+        parts = text.split(",")
+        # 只有逗号：1,234 / 1,234,567 视为千分位；1,23 视为小数点
+        if all(len(p) == 3 for p in parts[1:]) and 1 <= len(parts[0]) <= 3:
+            text = "".join(parts)
+        else:
+            text = text.replace(",", ".")
+
     try:
         f = float(text)
-    except Exception:
+    except (TypeError, ValueError):
         return None
+    if negative:
+        f = -f
     if is_percent:
         f = f / 100.0
-        return f
     return int(f) if f.is_integer() else f
 
 

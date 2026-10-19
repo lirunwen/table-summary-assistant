@@ -237,6 +237,22 @@ def create_app(port: int | None = None, host: str = "127.0.0.1") -> Flask:
         resp.headers["X-Content-Type-Options"] = "nosniff"
         resp.headers["X-Frame-Options"] = "SAMEORIGIN"
         resp.headers["Referrer-Policy"] = "no-referrer"
+        # 前端有 20 多处 innerHTML 拼接表格数据（虽然都过了 esc()），
+        # CSP 是漏掉一处时的最后一道防线：脚本只能来自本站文件，
+        # 内联 <script> 与 on* 属性一律不生效。样式仍需 inline，因为
+        # 组件里大量用 style="..." 做局部微调。
+        resp.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; "
+            "font-src 'self'; "
+            "connect-src 'self'; "
+            "object-src 'none'; "
+            "base-uri 'none'; "
+            "form-action 'self'; "
+            "frame-ancestors 'self'"
+        )
         if request.path.startswith("/api/"):
             resp.headers["Cache-Control"] = "no-store"
         elif request.path in ("/", "/index.html"):

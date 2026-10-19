@@ -5,7 +5,7 @@ import time
 from typing import Any
 
 from . import db
-from .readers import read_table_data
+from .readers import read_table_data_cached
 from .templates import template_by_id
 from .utils import (
     UserError,
@@ -72,7 +72,7 @@ class Registry:
             raise UserError("引用的数据表已被删除，请重新选择数据来源。")
         source, table = item
         try:
-            headers, rows, truncated = read_table_data(source, table)
+            headers, rows, truncated = read_table_data_cached(source, table)
         except UserError:
             raise
         except Exception as exc:
@@ -416,6 +416,9 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
         auto_by_name = bool(config.get("auto_by_name", True))
         for ld in lookup_data:
             headers = ld["headers"]
+            # 预先建好「列名 → 列下标」映射：以前是 rows × cols 次 headers.index()，
+            # 每次线性扫一遍表头；5 万行 × 20 列就是上百万次查找。
+            name_pos = {h: i for i, h in enumerate(headers)}
             for row in ld["rows"]:
                 out = []
                 for col in cols:
@@ -428,10 +431,7 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
                             value = _mapping_value(mapping, row, ctx=ctx)
                         elif auto_by_name:
                             # 纵向合并时，其他表按同名列自动填充
-                            try:
-                                idx = headers.index(col.get("name"))
-                            except ValueError:
-                                idx = -1
+                            idx = name_pos.get(col.get("name"), -1)
                             if idx >= 0:
                                 value = _apply_transform(row[idx], mapping.get("transform"), ctx)
                             else:

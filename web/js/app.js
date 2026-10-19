@@ -11,6 +11,7 @@ import settingsPage from './pages/settings.js';
 
 const view = document.getElementById('view');
 let cleanup = null;
+let routeSeq = 0;
 
 const STATIC_ROUTES = {
   '': { page: dashboardPage, nav: 'dashboard', crumb: [{ label: '工作台' }] },
@@ -64,13 +65,17 @@ function errorView(message, detail = '') {
         <h3>页面没有正常打开</h3>
         <p>${esc(message)}</p>
         ${detail ? `<details style="margin-top:12px;max-width:100%"><summary class="small muted">查看技术细节</summary><pre class="mono" style="white-space:pre-wrap;text-align:left;margin-top:8px">${esc(detail)}</pre></details>` : ''}
-        <button class="btn btn-primary" type="button" onclick="location.reload()">重新加载</button>
+        <button class="btn btn-primary" type="button" data-reload>重新加载</button>
       </div>
     </div>`;
+  view.querySelector('[data-reload]')?.addEventListener('click', () => location.reload());
 }
 
 async function route() {
   closeNav();
+  // 快速切页时，先发起的慢渲染可能后完成。用序号把过期结果丢掉，
+  // 否则旧页面会覆盖新页面，同时把新页面的 cleanup 冲掉。
+  const seq = ++routeSeq;
   const { segments, query } = parseHash();
   let page = null;
   let nav = '';
@@ -130,9 +135,17 @@ async function route() {
       navigate,
       setActiveNav,
     });
+    if (seq !== routeSeq) {
+      // 这次渲染已经过期：它写的 DOM 已被新页面取代，把它申请的清理函数就地执行
+      if (typeof result === 'function') {
+        try { result(); } catch (e) { console.warn(e); }
+      }
+      return;
+    }
     if (typeof result === 'function') cleanup = result;
     window.scrollTo(0, 0);
   } catch (err) {
+    if (seq !== routeSeq) return;
     console.error(err);
     errorView(err?.message || '未知错误', err?.stack || '');
   }

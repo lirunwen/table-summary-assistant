@@ -7,7 +7,7 @@ from pathlib import Path
 from . import db
 from .config import LIBRARY_DIR, LIMIT_ATTACHMENT_MB, LIMIT_UPLOAD_MB, SUPPORTED
 from .email_reader import parse_mail
-from .readers import table_for_csv, tables_for_excel
+from .readers import clear_table_cache, table_for_csv, tables_for_excel
 from .utils import UserError, now_iso, safe_filename, uid
 
 MAIL_ATTACHMENT_LIMIT = LIMIT_ATTACHMENT_MB * 1024 * 1024
@@ -234,16 +234,6 @@ def delete_source(source_id: str) -> None:
             pass
         db.execute("DELETE FROM sources WHERE id=?", (sid,))
 
-    # 清理引用这些表的数据源方案中的失效表，保持配置可用性由前端提示
-    profiles = db.profile_rows()
-    for profile in profiles:
-        cfg = profile.get("config") or {}
-        used = set()
-        if cfg.get("primary_table"):
-            used.add(cfg["primary_table"])
-        for lk in cfg.get("lookups") or []:
-            used.add(lk.get("table_id"))
-        for t in cfg.get("append_tables") or []:
-            used.add(t)
-        if any(t and t.split("::")[0] in to_delete for t in used):
-            pass  # 保留方案，前端会提示重新选择数据源
+    # 引用这些表的方案保留不动：前端会在打开时提示「数据源已失效」，
+    # 让用户自己决定重新选表还是删方案，比替他改配置更安全。
+    clear_table_cache()

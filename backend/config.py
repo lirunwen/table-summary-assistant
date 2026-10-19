@@ -7,7 +7,7 @@ from pathlib import Path
 
 APP_NAME = "表格汇总助手"
 APP_SUBTITLE = "多源数据汇总工作台"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 APP_ID = "huiyi"
 
 

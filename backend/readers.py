@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import csv
 import io
+import os
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -180,8 +182,10 @@ def _trim_grid(grid: list[list[Any]]) -> list[list[Any]]:
     return [(row + [None] * max_col)[:max_col] for row in grid]
 
 
-def analyze_grid(grid: list[list[Any]], header_row: int | None = None) -> dict:
-    grid = _trim_grid(grid)
+def analyze_grid(grid: list[list[Any]], header_row: int | None = None,
+                 trim: bool = True) -> dict:
+    if trim:
+        grid = _trim_grid(grid)
     if not grid:
         return {
             "header_row": 1, "headers": [], "row_count": 0, "sample": [],
@@ -307,7 +311,8 @@ def read_table_data(source: dict, table: dict) -> tuple[list[str], list[list[Any
     if not grid:
         return [], [], False
     hr = max(1, min(hr, len(grid)))
-    info = analyze_grid(grid, hr)
+    # 已经 trim 过了，别再让 analyze_grid 从头扫一遍整张网格
+    info = analyze_grid(grid, hr, trim=False)
     data = grid[hr:]
     data = [r for r in data if any(v is not None and str(v).strip() != "" for v in r)]
     truncated = len(data) > MAX_ROWS
@@ -315,3 +320,57 @@ def read_table_data(source: dict, table: dict) -> tuple[list[str], list[list[Any
     width = len(info["headers"])
     rows = [[(row[i] if i < len(row) else None) for i in range(width)] for row in data]
     return info["headers"], rows, truncated
+
+
+# ---------------------------------------------------------------------------
+# 解析结果缓存
+#
+# 用户调字段映射时会反复点「预览」，以前每一次都是完整的一次 openpyxl 读盘
+# （5 万行实测 8.1s）。这里按「文件 + mtime + 大小 + 表 + 表头行」做键缓存，
+# 文件一改 mtime 就变，自动失效，不需要手动清理。
+#
+# 只缓存中小表：大表本身就很占内存，再缓存一份只会把 600 MB 变成 1.2 GB。
+# ---------------------------------------------------------------------------
+_TABLE_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
+_TABLE_CACHE_MAX = 3
+# 单表超过这个单元格数就不缓存（默认 40 万，约等于 5 万行 × 8 列）。
+# 大表本身已经吃掉几百 MB，再留一份缓存会把内存直接翻倍；内存宽裕的机器
+# 可以用环境变量 HUIYI_TABLE_CACHE_CELLS 调大，设 0 表示关闭缓存。
+try:
+    _TABLE_CACHE_MAX_CELLS = max(0, int(os.environ.get("HUIYI_TABLE_CACHE_CELLS") or 400_000))
+except ValueError:
+    _TABLE_CACHE_MAX_CELLS = 400_000
+
+
+def _table_cache_key(source: dict, table: dict):
+    path = Path(table.get("path") or source.get("path") or "")
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (
+        str(path), stat.st_mtime_ns, stat.st_size,
+        table.get("kind"), table.get("sheet"), int(table.get("header_row") or 1),
+    )
+
+
+def clear_table_cache() -> None:
+    _TABLE_CACHE.clear()
+
+
+def read_table_data_cached(source: dict, table: dict) -> tuple[list[str], list[list[Any]], bool]:
+    """read_table_data 的带缓存版本。返回的列表视为只读，调用方不要原地修改。"""
+    key = _table_cache_key(source, table)
+    if key is None:
+        return read_table_data(source, table)
+    hit = _TABLE_CACHE.get(key)
+    if hit is not None:
+        _TABLE_CACHE.move_to_end(key)
+        return hit
+    result = read_table_data(source, table)
+    headers, rows = result[0], result[1]
+    if len(rows) * max(len(headers), 1) <= _TABLE_CACHE_MAX_CELLS:
+        _TABLE_CACHE[key] = result
+        while len(_TABLE_CACHE) > _TABLE_CACHE_MAX:
+            _TABLE_CACHE.popitem(last=False)
+    return result

@@ -100,21 +100,7 @@
   <noscript>
     <div class="noscript">表格汇总助手需要启用 JavaScript 才能运行。请在浏览器设置中允许本地脚本。</div>
   </noscript>
-  <script>
-    // 本地运行时的兜底提示：模块加载失败时不要让页面停在空白状态
-    window.addEventListener('error', function (event) {
-      var target = event.target;
-      var detail = event.message || (target && target.src ? '资源加载失败：' + target.src : '脚本执行失败');
-      var view = document.getElementById('view');
-      if (view) {
-        view.innerHTML = '<div style="max-width:640px;margin:10vh auto;padding:24px;background:#fff;border:1px solid #e3e9e5;border-radius:16px;font-family:sans-serif">'
-          + '<h2 style="margin:0 0 8px;font-size:18px">界面脚本没有正常加载</h2>'
-          + '<p style="color:#728078;font-size:13px">' + String(detail).replace(/[<>&]/g, '') + '</p>'
-          + '<button onclick="location.reload()" style="margin-top:12px;padding:9px 14px;border:0;border-radius:8px;background:#0e6b5c;color:#fff">重新加载</button></div>';
-      }
-      document.title = '加载失败 · 表格汇总助手';
-    }, true);
-  </script>
+  <script src="/js/boot-guard.js"></script>
   <script type="module" src="/js/app.js"></script>
 </body>
 </html>

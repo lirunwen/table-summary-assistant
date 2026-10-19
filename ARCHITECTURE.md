@@ -188,7 +188,9 @@ settings(key, value JSON)
 
 `direct / trim / text / number / date / upper / lower`。数值会去掉千分位、货币符号，
 百分比按数学语义折算（`50%` → `0.5`，写回时套 `0.00%` 格式）；日期支持
-`YYYY-MM-DD`、`YYYY/M/D`、中文日期、Excel 序列号等。
+`YYYY-MM-DD`、`YYYY/M/D`、中文日期等。**裸数字不猜日期**：`46000` 既可能是
+日期序列号也可能是真实编号，一律原样保留（真正的 Excel 日期单元格由 openpyxl
+读成 datetime，不经过这条推断）。
 
 **歧义日期不猜**：`03/04/2026` 这类日月两段都 ≤12 的输入无法从单条数据判断顺序，
 保持原文并在警告里汇总条数；`13/04/2026` 与 `04/25/2026` 则按数值大小正确识别为日/月、月/日。
@@ -308,6 +310,10 @@ data/
 - 以 `=`、`+`、`-`、`@` 开头（含前导空白/换行绕过）的文本写入 Excel 时设
   `quotePrefix` 强制为文本，避免公式注入；
 - 邮件附件只解析白名单扩展名，不执行任何宏/脚本；
+- 响应头带 `Content-Security-Policy`（`script-src 'self'`、`object-src 'none'`、
+  `base-uri 'none'`）：内联脚本与 `on*` 属性一律不生效，前端 20 多处 `innerHTML`
+  即使漏了一处 `esc()`，注入的脚本也执行不了。内联兜底脚本因此移到了
+  `web/js/boot-guard.js`；
 - 不接入任何外部服务，代码中无遥测、无 CDN；
 - 当前不做登录鉴权（单机信任模型）。若未来需要局域网共享，应增加访问令牌与 HTTPS/反向代理。
 
@@ -332,6 +338,15 @@ data/
 `backend/db.py` 用 `@contextmanager session()` 保证"一次操作一个连接、成功提交、
 失败回滚、无论如何 close"。**不要写成 `with sqlite3.connect(...)`**——它只提交事务，
 不关闭连接，长期运行会堆积文件描述符并持有 `.db-wal` 文件锁。
+
+## 13.3 解析结果缓存
+
+`backend/readers.py` 的 `read_table_data_cached()` 按
+「文件路径 + mtime + 大小 + 工作表 + 表头行」缓存解析结果。用户反复调字段映射
+时不再每次都重新 openpyxl 读盘；文件一改 mtime 就变，缓存自动失效。
+
+单表超过 40 万单元格时**不缓存**——大表本身已占几百 MB，再留一份会把内存翻倍。
+可用环境变量 `HUIYI_TABLE_CACHE_CELLS` 调整（设 `0` 关闭）。缓存的列表约定只读。
 
 ## 14. 测试
 

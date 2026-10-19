@@ -1,6 +1,11 @@
 /** 全局只读数据与选择器辅助。 */
 import { api } from './api.js';
 
+// 数据表索引缓存：allTables() 每次都要遍历整棵树并拼标签，
+// 而 tableHeaders/tableLabel 在方案编辑页的渲染循环里被调用十几次，
+// 不缓存的话一次渲染要重建上千次索引。
+let tableIndex = null;
+
 export const state = {
   app: null,
   settings: {},
@@ -24,6 +29,7 @@ export async function loadBootstrap() {
     stats: data.stats || {},
     loaded: true,
   });
+  tableIndex = null;   // 数据变了，索引失效
   updateChrome();
   return data;
 }
@@ -49,21 +55,33 @@ export function flatSources(nodes = state.sources, depth = 0, parent = null) {
   return out;
 }
 
-export function allTables() {
-  const out = [];
+function buildTableIndex() {
+  const list = [];
+  const byId = new Map();
   for (const source of flatSources()) {
     for (const table of source.meta?.tables || []) {
-      out.push({
+      const entry = {
         table,
         source,
         root: source.depth === 0 ? source : findRoot(source),
         depth: source.depth,
         label: tableOptionLabel(source, table),
         group: groupLabel(source, table),
-      });
+      };
+      list.push(entry);
+      if (table?.id) byId.set(table.id, entry);
     }
   }
-  return out;
+  return { list, byId };
+}
+
+export function invalidateTableIndex() {
+  tableIndex = null;
+}
+
+export function allTables() {
+  if (!tableIndex) tableIndex = buildTableIndex();
+  return tableIndex.list;
 }
 
 function findRoot(source) {
@@ -92,7 +110,8 @@ function groupLabel(source, table) {
 
 export function tableEntry(tableId) {
   if (!tableId) return null;
-  return allTables().find((t) => t.table.id === tableId) || null;
+  if (!tableIndex) tableIndex = buildTableIndex();
+  return tableIndex.byId.get(tableId) || null;
 }
 
 export function tableHeaders(tableId) {

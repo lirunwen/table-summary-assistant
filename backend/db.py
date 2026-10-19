@@ -81,7 +81,8 @@ def session() -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
+        # journal_mode 是数据库文件的持久属性，设一次即可；以前每次连接都执行
+        # 会短暂拿一次写锁。foreign_keys 则是每连接生效，必须保留。
         conn.execute("PRAGMA foreign_keys=ON")
         yield conn
         conn.commit()
@@ -97,6 +98,7 @@ def session() -> Iterator[sqlite3.Connection]:
 
 def init_db() -> None:
     with session() as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA)
         for k, v in DEFAULT_SETTINGS.items():
             conn.execute(
