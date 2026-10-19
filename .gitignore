@@ -1,0 +1,15 @@
+.venv/
+.buildvenv/
+__pycache__/
+*.py[cod]
+data/
+build/
+dist/
+*.spec.bak
+.DS_Store
+
+# 本机验证记录（含个人路径，不进入公开仓库）
+DEPLOY-ORBSTACK.md
+.dsh-office.*/
+
+.gh-config/

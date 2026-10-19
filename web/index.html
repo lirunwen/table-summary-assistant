@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="表格汇总助手 · 本地离线的多源数据汇总工作台">
+  <title>表格汇总助手 · 多源数据汇总工作台</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="#/" aria-label="表格汇总助手首页">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 40 40" fill="none">
+            <rect x="6" y="14" width="22" height="19" rx="4" fill="#CFE6DE"/>
+            <rect x="9" y="10" width="22" height="19" rx="4" fill="#92C7B6"/>
+            <rect x="12" y="6" width="22" height="19" rx="4" fill="#0F6B5C"/>
+            <path d="M18 12h10M18 16h10M18 20h6" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </span>
+        <span class="brand-text">
+          <strong>表格汇总助手</strong>
+          <small>多份表格，汇成一张表</small>
+        </span>
+      </a>
+
+      <nav class="nav" aria-label="主导航">
+        <div class="nav-label">工作区</div>
+        <a class="nav-item" href="#/" data-nav="dashboard">
+          <svg class="icon"><use href="/assets/icons.svg#i-dashboard"></use></svg>
+          <span>工作台</span>
+        </a>
+        <a class="nav-item" href="#/sources" data-nav="sources">
+          <svg class="icon"><use href="/assets/icons.svg#i-database"></use></svg>
+          <span>数据源</span>
+          <span class="nav-count" data-count="sources" hidden></span>
+        </a>
+        <a class="nav-item" href="#/profiles" data-nav="profiles">
+          <svg class="icon"><use href="/assets/icons.svg#i-layers"></use></svg>
+          <span>汇总方案</span>
+          <span class="nav-count" data-count="profiles" hidden></span>
+        </a>
+        <div class="nav-label nav-label-gap">分析与记录</div>
+        <a class="nav-item" href="#/compare" data-nav="compare">
+          <svg class="icon"><use href="/assets/icons.svg#i-compare"></use></svg>
+          <span>数据对比</span>
+        </a>
+        <a class="nav-item" href="#/runs" data-nav="runs">
+          <svg class="icon"><use href="/assets/icons.svg#i-history"></use></svg>
+          <span>生成记录</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="local-pill">
+          <span class="pulse-dot"></span>
+          <span>本地运行 · 数据不出本机</span>
+        </div>
+        <a class="nav-item nav-item-sub" href="#/settings" data-nav="settings">
+          <svg class="icon"><use href="/assets/icons.svg#i-settings"></use></svg>
+          <span>设置</span>
+        </a>
+        <div class="sidebar-version">表格汇总助手 v<span data-version>0.1.0</span></div>
+      </div>
+    </aside>
+
+    <div class="main-wrap">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="icon-btn menu-btn" id="menu-btn" type="button" aria-label="打开导航">
+            <svg class="icon"><use href="/assets/icons.svg#i-menu"></use></svg>
+          </button>
+          <nav class="breadcrumb" id="breadcrumb" aria-label="面包屑"></nav>
+        </div>
+        <div class="topbar-right">
+          <span class="date-chip" id="today-chip"></span>
+          <button class="icon-btn" id="help-btn" type="button" aria-label="使用说明">
+            <svg class="icon"><use href="/assets/icons.svg#i-help"></use></svg>
+          </button>
+          <div class="avatar" title="本机使用者">本</div>
+        </div>
+      </header>
+
+      <main class="view" id="view" tabindex="-1">
+        <div class="boot-loading">
+          <div class="spinner"></div>
+          <p>正在打开工作台…</p>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <div class="sidebar-scrim" id="sidebar-scrim"></div>
+  <div id="modal-root"></div>
+  <div id="toast-root" class="toast-root" role="status" aria-live="polite"></div>
+
+  <noscript>
+    <div class="noscript">表格汇总助手需要启用 JavaScript 才能运行。请在浏览器设置中允许本地脚本。</div>
+  </noscript>
+  <script>
+    // 本地运行时的兜底提示：模块加载失败时不要让页面停在空白状态
+    window.addEventListener('error', function (event) {
+      var target = event.target;
+      var detail = event.message || (target && target.src ? '资源加载失败：' + target.src : '脚本执行失败');
+      var view = document.getElementById('view');
+      if (view) {
+        view.innerHTML = '<div style="max-width:640px;margin:10vh auto;padding:24px;background:#fff;border:1px solid #e3e9e5;border-radius:16px;font-family:sans-serif">'
+          + '<h2 style="margin:0 0 8px;font-size:18px">界面脚本没有正常加载</h2>'
+          + '<p style="color:#728078;font-size:13px">' + String(detail).replace(/[<>&]/g, '') + '</p>'
+          + '<button onclick="location.reload()" style="margin-top:12px;padding:9px 14px;border:0;border-radius:8px;background:#0e6b5c;color:#fff">重新加载</button></div>';
+      }
+      document.title = '加载失败 · 表格汇总助手';
+    }, true);
+  </script>
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+# 表格汇总助手 · 运行依赖（均为纯 Python / 通用 wheel，适合离线部署）
+Flask==3.1.3
+waitress==3.0.2
+openpyxl==3.1.5
+extract-msg==0.56.1
+xlrd==2.0.2

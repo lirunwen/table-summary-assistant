@@ -1,0 +1,312 @@
+# 表格汇总助手 · 架构设计
+
+> 面向 Windows 办公室内网的本地数据汇总工作台。无公网依赖，双击启动，浏览器作为界面，数据全部留在本机。
+
+## 1. 目标与约束
+
+| 约束 | 设计回应 |
+| --- | --- |
+| 同事各自在自己的 Windows 电脑使用，不要求同时在线 | 单机单实例架构，不做账号、并发与权限系统 |
+| 办公室内网可能完全断网 | 前端零 CDN、零 web font、零构建产物拉取；后端依赖随程序分发 |
+| 需要处理 Excel、CSV、Outlook 邮件/附件 | 服务端统一解析为“数据表”，前端只面对表、列、行 |
+| 汇总到“指定的目标 Excel” | 支持上传模板，复制模板后填数据，保留版式、列宽、公式列 |
+| 每一列单独指定来源 | 列级映射模型：来源表 + 字段 + 处理方式 + 缺省值 |
+| 支持数据对比 | 按主键对两次结果/任意两表做行级与单元格级 diff，可导出报告 |
+| 界面美观、卡片式、清晰 | 原生 CSS 设计系统，左栏工作台布局，语义化卡片与状态色 |
+| 部署与更新方便 | 单目录分发；`data/` 与程序分离；升级只替换程序文件 |
+
+## 2. 技术选型
+
+| 层 | 选择 | 原因 |
+| --- | --- | --- |
+| 运行时 | Python 3.11+ | Windows 普及、Office 生态成熟、打包简单 |
+| Web 框架 | Flask 3 | 轻量、纯 Python、路由与文件上传够用；不需要前后端分离部署 |
+| WSGI 服务 | waitress | 纯 Python、Windows 稳定，避免开发服务器警告与 Linux 依赖 |
+| Excel 读写 | openpyxl | 保留模板样式、列宽、合并单元格、公式；支持 `.xlsx/.xlsm` |
+| 旧版 `.xls` 读取 | xlrd | 兼容 Office 97-2003 输入 |
+| Outlook | extract-msg + 标准库 email | `.msg/.oft` 与 `.eml` 本地解析，提取正文表格和附件 |
+| 元数据 | SQLite（标准库） | 零安装、单文件、事务可靠；方案/运行记录/设置 |
+| 前端 | 原生 HTML + CSS + ES Modules | 无需 Node、无构建步骤、无框架 CDN；离线最稳，升级只改静态文件 |
+| 打包 | PyInstaller（Windows） | 生成免安装目录，目标机无需 Python；也可用“嵌入 Python + wheelhouse”方案 |
+
+刻意不使用：
+
+- **Electron**：体积大、需要 Node 工具链，Office 文件解析能力反而弱。
+- **pandas**：对本工具的数据规模（办公表格，通常几万行）收益有限，打包体积与启动成本明显增加。
+- **CDN / Google Fonts / 图标库**：内网断网会直接破相；所有图标为本地 SVG sprite，字体使用系统字体栈。
+- **前端框架 + 构建链**：页面数量可控，原生模块足够；避免“源码能跑、构建产物丢失”的部署风险。
+
+## 3. 运行拓扑
+
+```text
+┌──────────────────────────── 本机（127.0.0.1） ────────────────────────────┐
+│                                                                          │
+│   Chrome / Edge  ──HTTP──▶  Flask + waitress（仅监听回环地址）             │
+│        │                         │                                       │
+│        │                         ├─ 数据接入：Excel / CSV / .msg / .eml   │
+│        │                         ├─ 汇总引擎：join / append + 列映射       │
+│        │                         ├─ 模板写入：openpyxl                    │
+│        │                         ├─ 对比引擎：按主键 diff                  │
+│        │                         └─ SQLite 元数据 + data/ 文件仓           │
+│        │                                                                  │
+│        └── 静态资源全部来自 /css /js /assets（本地文件）                   │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+启动时 `app.py` 先初始化目录与数据库，再寻找可用端口（默认 8765），启动 waitress，并自动打开浏览器。服务只绑定 `127.0.0.1`，同一内网的其他电脑无法访问。
+
+## 4. 模块划分
+
+```text
+huiyi/
+├─ app.py                 启动器：日志、端口、waitress、打开浏览器
+├─ backend/
+│  ├─ config.py           路径、常量、支持格式、默认设置
+│  ├─ db.py               SQLite schema 与查询封装
+│  ├─ utils.py            ID、值规整、日期/数字解析、表头评分
+│  ├─ readers.py          Excel / xls / CSV 读取、表头识别、表元数据
+│  ├─ email_reader.py     .msg / .eml 解析、HTML 表格提取
+│  ├─ ingest.py           落盘、类型分派、邮件附件递归登记、删除
+│  ├─ templates.py        目标模板登记、工作表/表头解析
+│  ├─ engine.py           配置校验、join/append、映射、统计
+│  ├─ writer.py           模板填充或新建工作簿、样式与公式保护
+│  ├─ diff.py             主键对比、差异明细、Excel 报告
+│  └─ api.py              Flask 路由、序列化、清理策略
+├─ web/
+│  ├─ index.html          应用壳层（侧栏、顶栏、挂载点）
+│  ├─ css/app.css         设计系统与所有页面样式（无外部资源）
+│  ├─ assets/icons.svg    本地 SVG 图标 sprite
+│  └─ js/
+│     ├─ app.js           哈希路由、壳层、错误兜底
+│     ├─ api.js           fetch 封装与错误规范
+│     ├─ store.js         全局数据、数据表选择器、配置规范化
+│     ├─ ui.js            Toast / Modal / 格式化 / 表单片段
+│     ├─ components.js    方案卡片、新建方案、运行详情
+│     └─ pages/           工作台、数据源、方案、编辑、对比、记录、设置
+├─ samples/               可试用的示例 Excel / CSV / EML / XLS
+├─ tests/                 端到端 API 冒烟测试、UI 截图工具
+├─ packaging/             Windows 打包脚本、spec、图标、离线 wheels 脚本
+├─ data/                  运行时生成（不入库）
+└─ requirements*.txt
+```
+
+## 5. 数据模型
+
+SQLite 只存“元数据 + 配置”，原始表格与结果文件留在磁盘。
+
+```text
+sources(id, name, kind, path, size, parent_id, created_at, meta JSON)
+templates(id, name, path, size, created_at, meta JSON)
+profiles(id, name, note, config JSON, created_at, updated_at, last_run_at)
+runs(id, profile_id, profile_name, created_at, status, output_path,
+     output_name, summary JSON, config_snapshot JSON, error, duration_ms)
+compares(id, name, path, created_at, summary JSON)
+settings(key, value JSON)
+```
+
+### 数据表（Table）
+
+一个上传文件可能产生多张“数据表”：
+
+- Excel：每个非空工作表一张；
+- CSV / TSV：整份文件一张；
+- Outlook 邮件：正文中的每个 HTML 表格一张 + 每个支持的附件作为独立子数据源（附件里的每个工作表再各一张）。
+
+表 ID 形如 `source_id::s0` / `source_id::b0`：
+
+- `s0` 是工作表序号，`b0` 是正文表格序号；
+- 表 ID 稳定地对应“某个数据源中的第几张表”；
+- 方案只存表 ID 与列索引，不复制整表数据；源文件更新后重新运行即可。
+
+`meta` 中保存工作表名、表头行、表头数组、行数、前 8 行样例等。读取时按表头行重新解析，用户可在数据源预览中调整表头行。
+
+### 方案配置（Profile.config）
+
+```json
+{
+  "mode": "join",
+  "primary_table": "s_ab12::s0",
+  "primary_keys": [0],
+  "lookups": [
+    { "table_id": "s_cd34::s0", "keys": [0] }
+  ],
+  "append_tables": [],
+  "auto_by_name": true,
+  "target": {
+    "kind": "template",
+    "template_id": "t_ef56",
+    "sheet": "人员汇总",
+    "header_row": 2,
+    "write_mode": "replace",
+    "columns": [
+      { "key": "c_x1", "name": "工号", "type": "text",
+        "included": true, "template_col": 0 }
+    ]
+  },
+  "mappings": {
+    "c_x1": {
+      "mode": "table",
+      "table_id": "s_ab12::s0",
+      "column_index": 0,
+      "column_name": "工号",
+      "transform": "trim",
+      "fallback": ""
+    }
+  },
+  "options": { "dedupe": true }
+}
+```
+
+映射有三种模式：
+
+- `table`：指定数据表 + 列索引，可叠加处理方式与缺省值；
+- `const`：整列固定值；
+- `blank`：显式留空。
+
+## 6. 汇总引擎
+
+### 6.1 主表关联（join）
+
+- 主表决定输出行数与顺序；
+- 主键支持组合键（多个列索引）；
+- 每个关联表建立 `normalized_key → row` 索引，重复键取第一条并告警；
+- 目标列按映射从主表或关联表取值；
+- 未命中、空值 → `fallback`；仍为空则写空字符串；
+- 可选“主键重复只保留第一行”。
+
+键归一化会做：NFKC、去首尾空白、压缩空白、`1.0 → 1`、日期统一为 ISO。避免 Excel 里“看起来一样但匹配不上”的常见问题。
+
+### 6.2 多表纵向合并（append）
+
+- 按用户选定顺序遍历表；
+- 映射指定了当前表 → 取当前表字段；
+- 否则若开启“同名列自动匹配”，按目标列名在当前表中查找同名列；
+- 都没有 → 缺省值；
+- 适合多个月份、多个部门的同构表汇总。
+
+### 6.3 处理方式
+
+`direct / trim / text / number / date / upper / lower`。数值会去掉千分位、货币符号；日期支持 `YYYY-MM-DD`、`YYYY/M/D`、中文日期、Excel 序列号等。全局“自动清理文本首尾空格”可在设置中关闭。
+
+## 7. 模板写入
+
+1. 复制模板文件到本次运行的独立目录，绝不原地修改模板；
+2. 用 openpyxl 打开副本（`.xlsm` 使用 `keep_vba=True`）；
+3. 按 `template_col` 定位每列，找不到时按表头名回退；
+4. `replace`：从表头下一行开始写，清理映射列旧值，保留行样式；
+5. `append`：找到所有列中最后一个有值的行，把新数据追加到其后；
+6. 新行超出模板已有数据区时，复制首行数据区样式与行高；
+7. 未被纳入映射的模板列保持原样，适合公式列、签字列、手工备注列；
+8. 保存为新的 `.xlsx` / `.xlsm`，文件名带秒级时间戳。
+
+已知边界：openpyxl 不能完整保留图表、图片、数据透视表等对象；极复杂的模板建议先用 Excel 打开核对一次。模板数据区若有合并单元格，写入会给出明确错误提示。
+
+## 8. 数据对比
+
+- 对比对象可以是两次运行结果，也可以任意一张数据表；
+- 选择共同主键（支持组合键），两侧分别建立行索引；
+- 统计新增行、删除行、修改行、未变化行；
+- 修改按“单元格”记录：主键、字段、左侧值、右侧值；
+- 单侧独有列单独列出，不误判为整行变化；
+- 重复主键取第一条并提示；空主键行跳过；
+- 明细在接口中最多返回 800 条变化 / 300 行新增删除，完整报告写入 Excel：
+  - 对比摘要
+  - 差异明细
+  - 新增行
+  - 删除行
+
+## 9. API 一览
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/bootstrap` | 一次返回应用信息、数据源树、模板、方案、运行、设置、统计 |
+| POST | `/api/sources/upload` | 多文件上传与解析（multipart） |
+| PATCH | `/api/sources/:id` | 重命名或调整某张表的表头行 |
+| DELETE | `/api/sources/:id` | 删除数据源（邮件会连同附件） |
+| GET | `/api/table-preview` | 按表 ID 预览前 N 行 |
+| POST | `/api/templates/upload` | 上传目标 Excel 模板 |
+| POST | `/api/templates/:id/inspect` | 按工作表/表头行重新解析 |
+| POST | `/api/preview` | 不落盘，按当前配置生成前 50 行预览 |
+| POST | `/api/profiles/:id/run` | 保存配置并生成结果 |
+| GET | `/api/runs/:id/download` | 下载结果文件 |
+| POST | `/api/compare` | 生成对比并导出报告 |
+| GET | `/api/compares/:id/download` | 下载对比报告 |
+| PUT | `/api/settings` | 日期格式、空格清理、保留条数 |
+| POST | `/api/cleanup` | 清理旧运行记录与过期对比报告 |
+
+统一响应：`{ "ok": true, ... }` 或 `{ "ok": false, "error": "可直接展示的中文错误" }`。
+
+## 10. 前端设计系统
+
+- 设计语言：深玉色（`#0E6B5C`）+ 暖白底 + 金色提示；卡片圆角 18px，细边框与柔和阴影。
+- 布局：固定侧栏 242px + 顶栏 + 内容区；方案编辑为“主表单 + 右侧运行检查栏”。
+- 全部 CSS 变量集中在 `:root`，便于换主题；响应式断点 1250 / 1080 / 900 / 640。
+- 图标：`assets/icons.svg` 单文件 sprite，`<use href="...#id">`，无图标字体。
+- 字体：`Segoe UI` / `Microsoft YaHei` / `PingFang SC` 系统栈，无需下载。
+- 交互：本地 Toast、Modal（含 Esc / 焦点陷阱）、拖拽上传、自动保存（950ms 防抖）、预览、运行结果弹窗。
+- 错误兜底：`index.html` 内联监听模块加载错误；路由层捕获渲染异常并显示可重试页面。
+
+## 11. 存储与清理
+
+```text
+data/
+├─ library/<source_id>/            原始文件；邮件正文 CSV 与附件在其工作目录
+├─ templates/<template_id>/        目标模板副本
+├─ runs/<run_id>/                  每次运行的结果文件
+├─ compares/                       对比报告
+├─ tmp/                            临时文件
+├─ logs/huiyi.log                  滚动日志
+└─ huiyi.db                        元数据
+```
+
+- 结果保留条数可在设置中调整（5–500，默认 30）；每次运行后自动清理更早结果。
+- 对比报告默认保留 30 天，可由「设置 → 清理旧记录」触发。
+- 所有路径都相对于程序目录（或 `HUIYI_DATA_DIR`），便于整目录迁移与备份。
+
+## 12. 部署与更新
+
+### 推荐：Windows 免安装目录版
+
+1. 在可联网的 Windows 电脑安装 Python 3.11/3.12；
+2. 运行 `packaging\build_windows.bat`；
+3. 得到 `dist\HuiYi\`，内含 `HuiYi.exe`、`_internal/`、启动脚本与说明；
+4. 把整个文件夹复制到目标电脑，双击「启动表格汇总助手.bat」；
+5. 首次启动自动创建 `data/`，无需管理员权限、无需安装。
+
+### 备选：源码 + 离线 wheelhouse
+
+1. 在联网 Windows 上运行 `packaging\prepare_offline_wheels.bat`；
+2. 把项目与 `packaging\wheels` 拷到内网电脑；
+3. `py -3 -m pip install --no-index --find-links packaging\wheels -r requirements.txt`；
+4. 双击 `start.bat`。
+
+### 更新
+
+- 保留 `data/`，替换 `HuiYi.exe`、`_internal/` 与前端静态资源；
+- 数据库 schema 目前只做增量建表，升级不会清空数据；
+- 建议升级前整体备份 `data/` 文件夹。
+
+## 13. 安全与边界
+
+- 默认仅绑定 `127.0.0.1`，不对外暴露端口；
+- 上传文件名清洗、路径基于 UUID 目录，静态文件路由做目录穿越校验；
+- 以 `=`、`+`、`@` 开头的文本写入 Excel 时强制为字符串，避免公式注入；
+- 邮件附件只解析白名单扩展名，不执行任何宏/脚本；
+- 不接入任何外部服务，代码中无遥测、无 CDN；
+- 当前不做登录鉴权（单机信任模型）。若未来需要局域网共享，应增加访问令牌与 HTTPS/反向代理。
+
+## 14. 测试
+
+- `tests/smoke.py`：Flask test client 端到端覆盖上传、模板、关联汇总、预览、表头调整、运行、下载、两次结果对比、结果对源表、纵向自动匹配、`.xls`、真实 `.msg`、公式注入、模板追加。
+- `tests/ui_shot.py`：开发期用 Chrome DevTools Protocol 截图与检查浏览器异常。
+- `samples/make_samples.py`：生成可复现的示例文件。
+
+## 15. 后续可扩展
+
+- 列级转换公式（拼接、截取、查找替换、正则）；
+- 方案导入/导出与跨电脑共享；
+- 多工作表/多行复杂表头；
+- 数据校验规则（必填、唯一、枚举）与问题行导出；
+- 通过 Windows COM 调用本机 Excel，精确保留图表/透视表；
+- 通过 Outlook COM 读取 `.pst/.ost`；
+- 局域网只读分享模式（带令牌）。
