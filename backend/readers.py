@@ -6,7 +6,13 @@ import io
 from pathlib import Path
 from typing import Any
 
-from .config import MAX_COLS, MAX_ROWS, PREVIEW_ROWS
+from .config import (
+    LIMIT_EXCEL_MB,
+    MAX_CELLS,
+    MAX_COLS,
+    MAX_ROWS,
+    PREVIEW_ROWS,
+)
 from .utils import (
     UserError,
     dedupe_headers,
@@ -74,10 +80,15 @@ def _fill_merged(ws, grid: list[list[Any]]) -> None:
             continue
 
 
-def read_excel_grids(path: Path | str) -> list[dict]:
+def read_excel_grids(path: Path | str, only_sheets: set[str] | None = None) -> list[dict]:
+    """读取工作簿为二维数组。
+
+    only_sheets 用于只解析真正被方案引用的工作表——以前一个 20 个 sheet 的
+    台账文件，为了读 1 张表也要把 20 张全部解析一遍。
+    """
     path = Path(path)
-    if path.stat().st_size > 120 * 1024 * 1024:
-        raise UserError("这个 Excel 文件超过 120 MB，建议先在 Excel 中拆分后再上传。")
+    if path.stat().st_size > LIMIT_EXCEL_MB * 1024 * 1024:
+        raise UserError(f"这个 Excel 文件超过 {LIMIT_EXCEL_MB} MB，建议先在 Excel 中拆分后再上传。")
     try:
         from openpyxl import load_workbook
 
@@ -87,9 +98,18 @@ def read_excel_grids(path: Path | str) -> list[dict]:
     results = []
     try:
         for ws in wb.worksheets:
-            grid: list[list[Any]] = []
+            if only_sheets is not None and ws.title not in only_sheets:
+                continue
             max_row = min(ws.max_row or 0, MAX_ROWS + 40)
-            for row in ws.iter_rows(min_row=1, max_row=max_row, max_col=min(ws.max_column or 1, MAX_COLS)):
+            max_col = min(ws.max_column or 1, MAX_COLS)
+            if max_row * max_col > MAX_CELLS:
+                raise UserError(
+                    f"工作表「{ws.title}」约 {max_row} 行 × {max_col} 列，"
+                    f"超过 {MAX_CELLS:,} 个单元格的处理上限。"
+                    "请先在 Excel 中删除空白行列、拆分工作表，或只上传需要的部分。"
+                )
+            grid: list[list[Any]] = []
+            for row in ws.iter_rows(min_row=1, max_row=max_row, max_col=max_col):
                 grid.append([cell.value for cell in row])
             _fill_merged(ws, grid)
             grid = [[format_value(v) for v in row] for row in grid]
@@ -248,7 +268,8 @@ def rebuild_table_meta(source: dict, table: dict, header_row: int | None = None)
     kind = table.get("kind")
     hr = header_row or table.get("header_row") or 1
     if kind in ("excel", "xls"):
-        grids = read_xls_grids(path) if kind == "xls" else read_excel_grids(path)
+        grids = (read_xls_grids(path) if kind == "xls"
+                 else read_excel_grids(path, only_sheets={table.get("sheet")}))
         target = next((g for g in grids if g["name"] == table.get("sheet")), None)
         if not target:
             raise UserError("找不到原来的工作表，文件可能已被移动。")
@@ -271,7 +292,8 @@ def read_table_data(source: dict, table: dict) -> tuple[list[str], list[list[Any
     kind = table.get("kind")
     hr = int(table.get("header_row") or 1)
     if kind in ("excel", "xls"):
-        grids = read_xls_grids(path) if kind == "xls" else read_excel_grids(path)
+        grids = (read_xls_grids(path) if kind == "xls"
+                 else read_excel_grids(path, only_sheets={table.get("sheet")}))
         target = next((g for g in grids if g["name"] == table.get("sheet")), None)
         if not target:
             raise UserError(f"文件「{source['name']}」中找不到工作表「{table.get('sheet')}」。")

@@ -119,7 +119,7 @@ config = {
         "t6": {"mode": "table", "table_id": sal_t["id"], "column_index": 1, "transform": "number", "fallback": ""},
         "t7": {"mode": "const", "value": "2026-10"},
     },
-    "options": {"dedupe": True, "skip_empty_key": True},
+    "options": {"dedupe": True, "skip_empty_key": False},
 }
 
 profile = post_json("/api/profiles", {"name": "10月人员汇总", "mode": "join"})["profile"]

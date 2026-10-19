@@ -189,8 +189,25 @@ def detect_header_row(grid: list[list[Any]], default: int = 1, scan: int = 10) -
     return best_row
 
 
+AMBIGUOUS_DMY_RE = re.compile(r"^(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{4})$")
+
+
+def ambiguous_date(value: Any) -> bool:
+    """形如 03/04/2026（两段都 ≤12）的日期，日月顺序无法从单条数据判断。"""
+    if not isinstance(value, str):
+        return False
+    m = AMBIGUOUS_DMY_RE.fullmatch(value.strip())
+    if not m:
+        return False
+    return int(m.group(1)) <= 12 and int(m.group(2)) <= 12
+
+
 def parse_date_value(value: Any) -> tuple[bool, Any]:
-    """尽量识别日期，返回 (是否识别, date/datetime 或原值)。"""
+    """尽量识别日期，返回 (是否识别, date/datetime 或原值)。
+
+    对 03/04/2026 这类无法区分日/月顺序的输入**不猜**：返回 False 让调用方
+    保留原文并给出警告。猜错一次，整列日期就是错的，而且不会有人发现。
+    """
     if isinstance(value, (dt.datetime, dt.date)):
         return True, value
     if value is None or value == "":
@@ -198,10 +215,24 @@ def parse_date_value(value: Any) -> tuple[bool, Any]:
     text = str(value).strip()
     if not text:
         return False, value
+
+    # 先处理「两位 + 两位 + 四位」，因为日月顺序要靠数值大小判断
+    m = AMBIGUOUS_DMY_RE.fullmatch(text)
+    if m:
+        first, second, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            if first > 12 >= second:          # 只能是 日/月
+                return True, dt.date(year, second, first)
+            if second > 12 >= first:          # 只能是 月/日
+                return True, dt.date(year, first, second)
+        except ValueError:
+            return False, value
+        return False, value                    # 两段都 ≤12：歧义，保留原文
+
     patterns = [
         "%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y年%m月%d日",
         "%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M",
-        "%Y/%m/%d %H:%M", "%Y%m%d", "%m/%d/%Y", "%d/%m/%Y",
+        "%Y/%m/%d %H:%M", "%Y%m%d",
     ]
     for fmt in patterns:
         try:
@@ -222,18 +253,28 @@ def parse_date_value(value: Any) -> tuple[bool, Any]:
 
 
 def coerce_number(value: Any):
+    """把单元格值转成数字。
+
+    百分比按数学语义折算："50%" → 0.5（写入时配 0.00% 格式显示回 50%）。
+    无法解析时返回 None，由调用方决定是否套缺省值。
+    """
     if value is None or value == "":
         return None
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return value
-    text = str(value).strip().replace(",", "").replace("，", "")
+    text = str(value).strip()
+    is_percent = text.endswith("%")
+    text = text.replace(",", "").replace("，", "")
     text = re.sub(r"[¥￥$元]\s*", "", text)
-    text = text.replace("%", "")
+    text = text.replace("%", "").strip()
     try:
         f = float(text)
-        return int(f) if f.is_integer() else f
     except Exception:
         return None
+    if is_percent:
+        f = f / 100.0
+        return f
+    return int(f) if f.is_integer() else f
 
 
 def human_datetime(iso_text: str | None) -> str:

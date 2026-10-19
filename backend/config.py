@@ -7,7 +7,7 @@ from pathlib import Path
 
 APP_NAME = "表格汇总助手"
 APP_SUBTITLE = "多源数据汇总工作台"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 APP_ID = "huiyi"
 
 
@@ -52,12 +52,22 @@ DEFAULT_SETTINGS = {
     "trim_text": True,
     "keep_runs": 30,
     "default_header_row": 1,
-    "max_upload_mb": 100,
 }
 
-MAX_ROWS = 200_000
-MAX_COLS = 300
+# ---------------------------------------------------------------------------
+# 容量上限：集中在这里，别再往业务代码里撒魔数（以前 100/120/200/50 MB
+# 分别硬编码在 ingest / readers / api 三处，改一处忘两处）。
+# ---------------------------------------------------------------------------
+MAX_ROWS = 200_000          # 单表最大数据行
+MAX_COLS = 300              # 单表最大列数
+MAX_CELLS = 3_000_000       # 单工作表最大单元格数（约 250–400 MB 内存），防 OOM
 PREVIEW_ROWS = 8
+
+LIMIT_UPLOAD_MB = 100       # 单个数据源文件
+LIMIT_EXCEL_MB = 120        # 单个 Excel（解压后体积通常远大于此，故另设单元格上限）
+LIMIT_ATTACHMENT_MB = 50    # 邮件单个附件
+LIMIT_REQUEST_MB = 200      # 单次 HTTP 请求总量
+
 ALLOWED_EXCEL = {".xlsx", ".xlsm", ".xltx", ".xltm"}
 ALLOWED_LEGACY = {".xls"}
 ALLOWED_CSV = {".csv", ".txt", ".tsv"}

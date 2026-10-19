@@ -1,0 +1,146 @@
+name: 构建 Windows 离线安装包
+
+# 触发方式：
+#   1) 打 tag 推送（推荐）：git tag v0.1.1 && git push origin v0.1.1
+#      → 自动构建并把 zip 挂到 Release，任何 Windows 电脑用浏览器即可下载
+#   2) 手动：Actions 页面点 Run workflow，产物在 Artifacts 里（需登录 GitHub 才能下）
+#
+# 为什么必须由 GitHub 构建：PyInstaller 不能跨平台交叉编译，
+# 在 macOS / Linux 上打不出 Windows 的 exe。
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（仅用于产物命名，可留空自动读取 backend/config.py）"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Windows x64 · PyInstaller
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Python 3.12 x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+          cache: "pip"
+
+      - name: 安装依赖
+        id: deps
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+          python -m pip install pyinstaller
+
+      # red-black-tree-mod 1.22 只有 sdist，新版 pip 解包时会 EEXIST 失败，
+      # 导致整个 requirements 安装中止。这里手动解包后本地安装再重试。
+      - name: 兜底安装 red-black-tree-mod 并重试
+        if: steps.deps.outcome == 'failure'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dir = Join-Path $env:RUNNER_TEMP "rbtm"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          python -m pip download red-black-tree-mod==1.22 --no-deps --no-binary :all: -d $dir
+          Push-Location $dir
+          tar -xzf "red-black-tree-mod-1.22.tar.gz"
+          python -m pip install (Resolve-Path ".\red-black-tree-mod-1.22")
+          Pop-Location
+          python -m pip install -r requirements-dev.txt
+          python -m pip install pyinstaller
+
+      - name: 校验依赖
+        run: python -c "import flask, openpyxl, xlrd, waitress, extract_msg; print('deps ok')"
+
+      - name: 回归测试
+        run: python -m pytest tests/test_regressions.py -q
+
+      - name: 端到端冒烟测试
+        env:
+          HUIYI_DATA_DIR: ${{ runner.temp }}\huiyi_smoke
+        run: python tests/smoke.py
+
+      - name: PyInstaller 打包
+        run: pyinstaller --noconfirm --clean packaging/huiyi.spec
+
+      - name: 组装发布目录
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ver = "${{ github.event.inputs.version }}"
+          if ([string]::IsNullOrWhiteSpace($ver)) {
+            if ("${{ github.ref_name }}" -match '^v(.+)$') { $ver = $Matches[1] }
+          }
+          if ([string]::IsNullOrWhiteSpace($ver)) {
+            $ver = (python -c "from backend.config import APP_VERSION; print(APP_VERSION)").Trim()
+          }
+          Write-Host "版本号: $ver"
+
+          $stage = "dist/stage/表格汇总助手"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "dist/HuiYi/*" $stage -Recurse -Force
+          Copy-Item "packaging/launcher.bat" "$stage/启动.bat" -Force
+          Copy-Item "packaging/使用说明-打包版.txt" "$stage/使用说明.txt" -Force
+          if (Test-Path "LICENSE") { Copy-Item "LICENSE" "$stage/LICENSE.txt" -Force }
+          if (Test-Path "samples") { Copy-Item "samples" "$stage/samples" -Recurse -Force }
+
+          $zip = "dist/表格汇总助手-v$ver-windows-x64.zip"
+          Compress-Archive -Path $stage -DestinationPath $zip -Force
+          "ZIP_NAME=$(Split-Path $zip -Leaf)" >> $env:GITHUB_ENV
+
+          # 体积体检：extract-msg 会拖进 oletools / cryptography 等一串依赖
+          $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
+          Write-Host "产物大小: $mb MB"
+          "ZIP_MB=$mb" >> $env:GITHUB_ENV
+
+      - name: 上传构建产物（Artifacts）
+        uses: actions/upload-artifact@v4
+        with:
+          name: 表格汇总助手-windows-x64
+          path: dist/*.zip
+          retention-days: 30
+
+      - name: 发布到 Release（仅 tag 触发）
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          body: |
+            ## 下载
+
+            点下方 **Assets** 里的 `表格汇总助手-v*-windows-x64.zip`（${{ env.ZIP_MB }} MB）。
+
+            解压后双击「启动.bat」即可，**目标电脑不需要安装 Python，也不需要管理员权限**。
+
+            ## 适用环境
+
+            - Windows 10 / 11（64 位）
+            - 全程离线，数据只保存在程序目录的 `data\` 文件夹
+            - 首次启动会自动打开浏览器；关闭黑色窗口即停止服务
+
+            ## 说明
+
+            本包由 GitHub Actions 在 `windows-latest` 上自动构建，
+            构建前已通过 `tests/test_regressions.py` 与 `tests/smoke.py`。

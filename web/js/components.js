@@ -207,7 +207,7 @@ export function openCreateProfileModal({ onCreated } = {}) {
         write_mode: 'replace', columns: [],
       },
       mappings: {},
-      options: { dedupe: true, skip_empty_key: true },
+      options: { dedupe: true, skip_empty_key: false },
     };
     if (template && template.meta?.sheets?.length) {
       applyTemplateToTarget(config, template, template.meta.sheets[0]);

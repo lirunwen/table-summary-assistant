@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 from .config import DB_PATH, DEFAULT_SETTINGS
 
@@ -69,41 +70,56 @@ CREATE TABLE IF NOT EXISTS settings (
 """
 
 
-def connect() -> sqlite3.Connection:
+@contextmanager
+def session() -> Iterator[sqlite3.Connection]:
+    """一次操作一个连接：成功提交、失败回滚、无论如何都关闭。
+
+    注意：`with sqlite3.connect(...)` 只负责事务提交，不会关闭连接
+    （sqlite3.Connection 的上下文管理器语义如此），长期运行会持续堆积
+    文件描述符与 db-wal 文件锁。这里显式 close。
+    """
     conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        yield conn
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
 
 
 def init_db() -> None:
-    with connect() as conn:
+    with session() as conn:
         conn.executescript(SCHEMA)
         for k, v in DEFAULT_SETTINGS.items():
             conn.execute(
                 "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
                 (k, json.dumps(v, ensure_ascii=False)),
             )
-        conn.commit()
 
 
 def query(sql: str, args: tuple = ()) -> list[dict]:
-    with connect() as conn:
+    with session() as conn:
         rows = conn.execute(sql, args).fetchall()
         return [dict(r) for r in rows]
 
 
 def query_one(sql: str, args: tuple = ()) -> dict | None:
-    with connect() as conn:
+    with session() as conn:
         row = conn.execute(sql, args).fetchone()
         return dict(row) if row else None
 
 
 def execute(sql: str, args: tuple = ()) -> None:
-    with connect() as conn:
+    with session() as conn:
         conn.execute(sql, args)
-        conn.commit()
 
 
 def get_settings() -> dict:
@@ -117,7 +133,7 @@ def get_settings() -> dict:
 
 
 def save_settings(patch: dict) -> dict:
-    with connect() as conn:
+    with session() as conn:
         for k, v in patch.items():
             if k not in DEFAULT_SETTINGS:
                 continue

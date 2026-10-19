@@ -1,47 +1,125 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 chcp 65001 >nul
 cd /d "%~dp0.."
-title 表格汇总助手 · 构建 Windows 免安装版
+title 表格汇总助手 · 构建 Windows 离线安装包
+
+echo.
+echo  ============================================================
+echo   构建 Windows 离线安装包（PyInstaller 目录版 + zip）
+echo   产物：dist\表格汇总助手-vX.Y.Z-windows-x64.zip
+echo  ============================================================
+echo.
 
 where py >nul 2>nul
 if errorlevel 1 (
-  echo 未找到 Python 启动器 py。请先安装 Python 3.11 / 3.12（64 位）。
+  echo [错误] 未找到 Python 启动器 py。
+  echo        请先安装 Python 3.11 或 3.12（64 位），安装时勾选 Add to PATH。
   pause
   exit /b 1
 )
 
 if not exist ".buildvenv\Scripts\python.exe" (
-  echo [1/4] 创建构建虚拟环境…
+  echo [1/6] 创建构建虚拟环境 .buildvenv ...
   py -3 -m venv .buildvenv
+  if errorlevel 1 (
+    echo [错误] 创建虚拟环境失败。
+    pause
+    exit /b 1
+  )
+) else (
+  echo [1/6] 复用已有 .buildvenv
 )
 
-echo [2/4] 安装运行依赖与 PyInstaller…
 call ".buildvenv\Scripts\activate.bat"
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt pyinstaller
-if errorlevel 1 (
-  echo 依赖安装失败，请检查网络或改用离线 wheels。
-  pause
-  exit /b 1
-)
-
-echo [3/4] 打包…
-pyinstaller --noconfirm --clean packaging\huiyi.spec
-if errorlevel 1 (
-  echo 打包失败，请查看上方日志。
-  pause
-  exit /b 1
-)
-
-echo [4/4] 复制启动脚本与说明…
-copy /Y start.bat "dist\HuiYi\start.bat" >nul
-copy /Y "启动表格汇总助手.bat" "dist\HuiYi\启动表格汇总助手.bat" >nul
-copy /Y README-使用说明.txt "dist\HuiYi\README-使用说明.txt" >nul
-if not exist "dist\HuiYi\data" mkdir "dist\HuiYi\data"
+python -m pip install --upgrade pip --quiet
 
 echo.
-echo 构建完成：dist\HuiYi\
-echo 把整个 HuiYi 文件夹复制到目标电脑，双击「启动表格汇总助手.bat」即可。
-echo 首次启动会在程序目录创建 data 文件夹。
+echo [2/6] 安装依赖与 PyInstaller ...
+python -m pip install -r requirements.txt pyinstaller --quiet
+if errorlevel 1 (
+  echo.
+  echo [提示] 直接安装失败，通常是 red-black-tree-mod 的 sdist 解包问题。
+  echo        正在尝试兜底方案 ...
+  if not exist ".cache\rbtm" mkdir ".cache\rbtm"
+  python -m pip download red-black-tree-mod==1.22 --no-deps --no-binary :all: -d ".cache\rbtm"
+  tar -xzf ".cache\rbtm\red-black-tree-mod-1.22.tar.gz" -C ".cache\rbtm"
+  python -m pip install ".cache\rbtm\red-black-tree-mod-1.22" --quiet
+  python -m pip install -r requirements.txt pyinstaller --quiet
+  if errorlevel 1 (
+    echo [错误] 兜底方案也失败，请检查网络或改用 packaging\prepare_offline_wheels.bat。
+    pause
+    exit /b 1
+  )
+)
+
+echo.
+echo [3/6] 校验依赖 ...
+python -c "import flask, openpyxl, xlrd, waitress, extract_msg; print('  依赖 OK')"
+if errorlevel 1 (
+  echo [错误] 依赖不完整。
+  pause
+  exit /b 1
+)
+
+echo.
+echo [4/6] 运行回归测试 ...
+python -m pytest tests\test_regressions.py -q
+if errorlevel 1 (
+  echo [错误] 回归测试未通过，已中止打包。
+  pause
+  exit /b 1
+)
+
+echo.
+echo [5/6] PyInstaller 打包 ...
+if exist "build" rmdir /S /Q "build"
+if exist "dist" rmdir /S /Q "dist"
+pyinstaller --noconfirm --clean packaging\huiyi.spec
+if errorlevel 1 (
+  echo [错误] 打包失败，请查看上方日志。
+  pause
+  exit /b 1
+)
+
+echo.
+echo [6/6] 组装发布目录并压缩 ...
+if not exist ".cache" mkdir ".cache"
+python -c "from backend.config import APP_VERSION; open('.cache/version.txt','w',encoding='utf-8').write(APP_VERSION)"
+set APPVER=0.0.0
+if exist ".cache\version.txt" set /p APPVER=<.cache\version.txt
+echo       版本号：%APPVER%
+
+set STAGE=dist\stage\表格汇总助手
+if exist "dist\stage" rmdir /S /Q "dist\stage"
+mkdir "%STAGE%"
+xcopy "dist\HuiYi\*" "%STAGE%\" /E /I /H /Y >nul
+copy /Y "packaging\launcher.bat" "%STAGE%\启动.bat" >nul
+copy /Y "packaging\使用说明-打包版.txt" "%STAGE%\使用说明.txt" >nul
+if exist "LICENSE" copy /Y "LICENSE" "%STAGE%\LICENSE.txt" >nul
+if exist "samples" xcopy "samples" "%STAGE%\samples\" /E /I /Y >nul
+
+set ZIP=dist\表格汇总助手-v%APPVER%-windows-x64.zip
+rem 优先用系统自带的 bsdtar（Win10 1803+），对中文路径更稳
+tar -a -c -f "%ZIP%" -C "dist\stage" "表格汇总助手"
+if errorlevel 1 (
+  echo       改用 PowerShell 压缩 ...
+  powershell -NoProfile -Command "Compress-Archive -Path 'dist\stage\表格汇总助手' -DestinationPath '%ZIP%' -Force"
+)
+if not exist "%ZIP%" (
+  echo [错误] 压缩失败。
+  pause
+  exit /b 1
+)
+
+echo.
+echo  ============================================================
+echo   构建完成
+echo   免安装目录：dist\HuiYi\
+echo   分发压缩包：%ZIP%
+echo.
+echo   用法：把 zip 发给同事，解压后双击「启动.bat」即可。
+echo   目标电脑不需要 Python，也不需要管理员权限。
+echo  ============================================================
+echo.
 pause

@@ -46,6 +46,8 @@ def load_side(spec: dict, registry: Registry | None = None) -> dict:
         columns = output.get("columns") or []
         sheet = output.get("sheet") or "汇总"
         header_row = int(output.get("header_row") or 1)
+        # append 模式下模板原有行在 data_start 之前，不能算作本次结果
+        data_start = int(output.get("data_start") or header_row + 1)
         try:
             wb = load_workbook(path, data_only=True, read_only=True)
             if sheet not in wb.sheetnames:
@@ -61,7 +63,7 @@ def load_side(spec: dict, registry: Registry | None = None) -> dict:
             if len(columns) != len(headers):
                 raise UserError("结果文件的列结构与记录不一致。")
             rows = []
-            for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+            for row in ws.iter_rows(min_row=data_start, values_only=True):
                 if not any(v is not None and str(v).strip() != "" for v in row):
                     continue
                 rows.append([row[c - 1] if c - 1 < len(row) else None for c in columns])

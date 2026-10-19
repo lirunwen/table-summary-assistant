@@ -9,6 +9,7 @@ from .readers import read_table_data
 from .templates import template_by_id
 from .utils import (
     UserError,
+    ambiguous_date,
     coerce_number,
     display_value,
     norm_key,
@@ -216,7 +217,7 @@ def validate_config(config: dict, registry: Registry | None = None) -> dict:
     }
 
 
-def _apply_transform(value: Any, transform: str | None) -> Any:
+def _apply_transform(value: Any, transform: str | None, ctx: dict | None = None) -> Any:
     if value is None:
         return None
     transform = transform or "direct"
@@ -228,7 +229,11 @@ def _apply_transform(value: Any, transform: str | None) -> Any:
         return coerce_number(value)
     if transform == "date":
         ok, parsed = parse_date_value(value)
-        return display_value(parsed) if ok else value
+        if ok:
+            return display_value(parsed)
+        if ctx is not None and ambiguous_date(value):
+            ctx["ambiguous_dates"] = ctx.get("ambiguous_dates", 0) + 1
+        return value
     if transform == "upper":
         return str(value).upper()
     if transform == "lower":
@@ -236,7 +241,8 @@ def _apply_transform(value: Any, transform: str | None) -> Any:
     return value
 
 
-def _mapping_value(mapping: dict, row: list[Any] | None, fallback: Any = None):
+def _mapping_value(mapping: dict, row: list[Any] | None, fallback: Any = None,
+                   ctx: dict | None = None):
     if mapping.get("mode") == "const":
         value = mapping.get("value")
     elif mapping.get("mode") == "table" and row is not None:
@@ -244,7 +250,7 @@ def _mapping_value(mapping: dict, row: list[Any] | None, fallback: Any = None):
         value = row[idx] if idx is not None and idx < len(row) else None
     else:
         value = None
-    value = _apply_transform(value, mapping.get("transform"))
+    value = _apply_transform(value, mapping.get("transform"), ctx)
     if value is None or (isinstance(value, str) and value.strip() == ""):
         fb = mapping.get("fallback", fallback)
         if fb is None:
@@ -291,9 +297,13 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
 
         seen = set()
         dedupe = bool(options.get("dedupe", True))
+        skip_empty = bool(options.get("skip_empty_key", False))
         deduped_rows = []
         for row in prows:
             key = _join_key(row, pkeys)
+            if skip_empty and not all(key):
+                totals["skipped"] += 1
+                continue
             if dedupe and all(key):
                 if key in seen:
                     totals["duplicates"] += 1
@@ -302,6 +312,8 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
             deduped_rows.append(row)
         if dedupe and totals["duplicates"]:
             warnings.append(f"主表中有 {totals['duplicates']} 行主键重复，已保留首次出现的行。")
+        if totals["skipped"]:
+            warnings.append(f"主表中有 {totals['skipped']} 行主键为空，已按设置跳过。")
         primary_data["rows"] = deduped_rows
 
         for i, lk in enumerate(config.get("lookups") or []):
@@ -362,23 +374,23 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
     output_rows: list[list[Any]] = []
     filled = 0
     empty = 0
+    ctx: dict = {"ambiguous_dates": 0}
 
-    def resolve_for_join(col, mapping, primary_row, lookup_rows):
+    def resolve_for_join(mapping, primary_row, lookup_rows):
         tid = mapping.get("table_id")
         if mapping.get("mode") == "const":
-            return _mapping_value(mapping, None)
+            return _mapping_value(mapping, None, ctx=ctx)
         if mapping.get("mode") != "table":
             return ""
         if tid == primary_data["table_id"]:
-            return _mapping_value(mapping, primary_row)
+            return _mapping_value(mapping, primary_row, ctx=ctx)
         row = lookup_rows.get(tid)
         if row is None:
             # 主键为空或未匹配时使用缺省值
-            return _mapping_value({**mapping, "mode": "const", "value": None}, None)
-        return _mapping_value(mapping, row)
+            return _mapping_value({**mapping, "mode": "const", "value": None}, None, ctx=ctx)
+        return _mapping_value(mapping, row, ctx=ctx)
 
     if mode == "join":
-        lookup_rows_by_table = {}
         # 每行动态计算 lookup 行，避免构建巨大笛卡尔结构
         pkeys = [int(k) for k in (config.get("primary_keys") or [])]
         for row in primary_data["rows"]:
@@ -390,7 +402,7 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
             out = []
             for col in cols:
                 mapping = mappings.get(col.get("key")) or {"mode": "blank"}
-                value = resolve_for_join(col, mapping, row, matched_rows)
+                value = resolve_for_join(mapping, row, matched_rows)
                 if trim_text and isinstance(value, str):
                     value = value.strip()
                 out.append(value)
@@ -410,10 +422,10 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
                     mapping = mappings.get(col.get("key")) or {"mode": "blank"}
                     value = None
                     if mapping.get("mode") == "const":
-                        value = _mapping_value(mapping, None)
+                        value = _mapping_value(mapping, None, ctx=ctx)
                     elif mapping.get("mode") == "table":
                         if mapping.get("table_id") == ld["table_id"]:
-                            value = _mapping_value(mapping, row)
+                            value = _mapping_value(mapping, row, ctx=ctx)
                         elif auto_by_name:
                             # 纵向合并时，其他表按同名列自动填充
                             try:
@@ -421,13 +433,13 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
                             except ValueError:
                                 idx = -1
                             if idx >= 0:
-                                value = _apply_transform(row[idx], mapping.get("transform"))
+                                value = _apply_transform(row[idx], mapping.get("transform"), ctx)
                             else:
                                 value = _mapping_value(
-                                    {**mapping, "mode": "const", "value": None}, None)
+                                    {**mapping, "mode": "const", "value": None}, None, ctx=ctx)
                         else:
                             value = _mapping_value(
-                                {**mapping, "mode": "const", "value": None}, None)
+                                {**mapping, "mode": "const", "value": None}, None, ctx=ctx)
                     if value is None:
                         value = ""
                     if trim_text and isinstance(value, str):
@@ -439,6 +451,12 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
                         filled += 1
                 output_rows.append(out)
             totals["input"] += len(ld["rows"])
+
+    if ctx["ambiguous_dates"]:
+        warnings.append(
+            f"{ctx['ambiguous_dates']} 个日期形如 03/04/2026，无法判断日/月顺序，已按原文保留。"
+            "如需统一，请先在源表中改成 2026-03-04 这种格式。"
+        )
 
     headers = [str(c["name"]).strip() for c in cols]
     if preview_limit is not None and preview_limit > 0:

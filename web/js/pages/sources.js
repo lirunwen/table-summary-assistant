@@ -137,7 +137,8 @@ function openPreview(sourceId, tableId) {
             <tbody>${rows || `<tr><td colspan="${Math.max(1, data.headers.length)}"><span class="faint">这张表没有数据行。</span></td></tr>`}</tbody>
           </table>
         </div>` : `<div class="empty small"><div class="empty-icon">${icon('table')}</div><h3>没有可用列</h3><p>请调整表头行，或检查文件内容。</p></div>`}
-      <div class="table-scroll-note">${data.truncated ? '源文件行数超过 20 万行，汇总时只读取前 20 万行。' : `预览前 ${fmtNumber(data.shown)} 行，共 ${fmtNumber(data.row_count)} 行。`}</div>`;
+      <div class="table-scroll-note">${data.truncated ? '源文件行数超过 20 万行，汇总时只读取前 20 万行。' : `预览前 ${fmtNumber(data.shown)} 行，共 ${fmtNumber(data.row_count)} 行。`}</div>
+      ${(data.empty_columns || []).length ? `<div class="warning-note mt-10">${icon('alert')}<span>这些列在${fmtNumber(data.scanned_rows || 0)} 行内全部为空：${data.empty_columns.map((c) => esc(c)).join('、')}。如果源表这些列是公式，请先在 Excel 中打开并另存一次，再重新上传。</span></div>` : ''}`;
 
     body.querySelectorAll('[data-tab]').forEach((btn) => {
       btn.addEventListener('click', () => load(btn.dataset.tab));

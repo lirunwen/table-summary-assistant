@@ -184,7 +184,7 @@ export function defaultConfig(mode = 'join') {
       columns: [],
     },
     mappings: {},
-    options: { dedupe: true, skip_empty_key: true },
+    options: { dedupe: true, skip_empty_key: false },
   };
 }
 
@@ -202,6 +202,6 @@ export function normalizeConfig(raw, mode = 'join') {
   }));
   cfg.append_tables = Array.isArray(cfg.append_tables) ? cfg.append_tables.filter(Boolean) : [];
   cfg.mappings = cfg.mappings && typeof cfg.mappings === 'object' ? cfg.mappings : {};
-  cfg.options = { dedupe: true, skip_empty_key: true, ...(cfg.options || {}) };
+  cfg.options = { dedupe: true, skip_empty_key: false, ...(cfg.options || {}) };
   return cfg;
 }

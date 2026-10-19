@@ -80,7 +80,7 @@ def inspect_sheet(template_id: str, sheet_name: str, header_row: int | None = No
     row = template_by_id(template_id)
     if not row:
         raise UserError("模板不存在或已删除。")
-    grids = read_excel_grids(Path(row["path"]))
+    grids = read_excel_grids(Path(row["path"]), only_sheets={sheet_name})
     target = next((g for g in grids if g["name"] == sheet_name), None)
     if not target:
         raise UserError("模板中找不到该工作表。")

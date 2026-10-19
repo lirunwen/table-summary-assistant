@@ -186,7 +186,15 @@ settings(key, value JSON)
 
 ### 6.3 处理方式
 
-`direct / trim / text / number / date / upper / lower`。数值会去掉千分位、货币符号；日期支持 `YYYY-MM-DD`、`YYYY/M/D`、中文日期、Excel 序列号等。全局“自动清理文本首尾空格”可在设置中关闭。
+`direct / trim / text / number / date / upper / lower`。数值会去掉千分位、货币符号，
+百分比按数学语义折算（`50%` → `0.5`，写回时套 `0.00%` 格式）；日期支持
+`YYYY-MM-DD`、`YYYY/M/D`、中文日期、Excel 序列号等。
+
+**歧义日期不猜**：`03/04/2026` 这类日月两段都 ≤12 的输入无法从单条数据判断顺序，
+保持原文并在警告里汇总条数；`13/04/2026` 与 `04/25/2026` 则按数值大小正确识别为日/月、月/日。
+猜错一次整列日期就是错的，而且不会有任何人发现——所以选择"不猜"。
+
+全局"自动清理文本首尾空格"可在设置中关闭。
 
 ## 7. 模板写入
 
@@ -204,6 +212,8 @@ settings(key, value JSON)
 ## 8. 数据对比
 
 - 对比对象可以是两次运行结果，也可以任意一张数据表；
+- 读取运行结果时从 `summary.output.data_start` 开始，而不是固定 `header_row + 1`：
+  append 模式下模板原有行位于 `data_start` 之前，不能被算作本次结果；
 - 选择共同主键（支持组合键），两侧分别建立行索引；
 - 统计新增行、删除行、修改行、未变化行；
 - 修改按“单元格”记录：主键、字段、左侧值、右侧值；
@@ -289,17 +299,58 @@ data/
 ## 13. 安全与边界
 
 - 默认仅绑定 `127.0.0.1`，不对外暴露端口；
+- **请求来源校验**（`before_request`）：绑回环地址时拒绝 Host 不是
+  `127.0.0.1 / localhost / ::1` 的请求（防 DNS rebinding）；写操作若带
+  `Origin` 必须与当前 Host 同源，`Sec-Fetch-Site` 为 `cross-site` 一律拒绝。
+  没有这道校验时，任意网页都能向 `127.0.0.1:8765` 提交 multipart 表单
+  （简单请求免预检），把文件塞进数据目录，或直接 `POST /api/cleanup` 清空历史记录；
 - 上传文件名清洗、路径基于 UUID 目录，静态文件路由做目录穿越校验；
-- 以 `=`、`+`、`@` 开头的文本写入 Excel 时强制为字符串，避免公式注入；
+- 以 `=`、`+`、`-`、`@` 开头（含前导空白/换行绕过）的文本写入 Excel 时设
+  `quotePrefix` 强制为文本，避免公式注入；
 - 邮件附件只解析白名单扩展名，不执行任何宏/脚本；
 - 不接入任何外部服务，代码中无遥测、无 CDN；
 - 当前不做登录鉴权（单机信任模型）。若未来需要局域网共享，应增加访问令牌与 HTTPS/反向代理。
 
+## 13.1 容量与资源上限
+
+统一在 `backend/config.py`，避免同一件事在三个文件里各写一个魔数：
+
+| 常量 | 值 | 作用 |
+| --- | --- | --- |
+| `MAX_ROWS` / `MAX_COLS` | 200 000 / 300 | 单表最大行列 |
+| `MAX_CELLS` | 3 000 000 | 单工作表单元格上限，防 OOM（约 250–400 MB） |
+| `LIMIT_UPLOAD_MB` | 100 | 单个数据源文件（落盘**前**检查） |
+| `LIMIT_EXCEL_MB` | 120 | 单个 Excel |
+| `LIMIT_ATTACHMENT_MB` | 50 | 邮件单个附件 |
+| `LIMIT_REQUEST_MB` | 200 | 单次 HTTP 请求总量（Flask `MAX_CONTENT_LENGTH`） |
+
+读取时通过 `read_excel_grids(path, only_sheets={...})` 只解析被方案引用的工作表；
+一个 20 个 sheet 的台账文件不再为了读 1 张表而全量解析 20 张。
+
+## 13.2 数据库连接
+
+`backend/db.py` 用 `@contextmanager session()` 保证"一次操作一个连接、成功提交、
+失败回滚、无论如何 close"。**不要写成 `with sqlite3.connect(...)`**——它只提交事务，
+不关闭连接，长期运行会堆积文件描述符并持有 `.db-wal` 文件锁。
+
 ## 14. 测试
 
+- `tests/test_regressions.py`：pytest 单元/回归用例，覆盖已修缺陷——百分比语义、
+  日期歧义、数据库连接释放、追加模式对比行数、跨站请求拦截、DNS rebinding、
+  公式注入、空主键跳过、单元格上限、按需解析工作表。**CI 必跑，不过不出包。**
 - `tests/smoke.py`：Flask test client 端到端覆盖上传、模板、关联汇总、预览、表头调整、运行、下载、两次结果对比、结果对源表、纵向自动匹配、`.xls`、真实 `.msg`、公式注入、模板追加。
 - `tests/ui_shot.py`：开发期用 Chrome DevTools Protocol 截图与检查浏览器异常。
 - `samples/make_samples.py`：生成可复现的示例文件。
+
+## 14.1 发布流水线
+
+`.github/workflows/build-windows.yml`：
+
+- 触发：推送 `v*` tag，或 Actions 页面手动 Run workflow；
+- 环境：`windows-latest` + Python 3.12 x64（PyInstaller 不能跨平台交叉编译，必须 Windows）；
+- 步骤：装依赖（含 `red-black-tree-mod` sdist 解包失败的兜底）→ 校验 import →
+  跑 `pytest` → 跑 `smoke.py` → PyInstaller → 组装目录 → zip → Artifacts / Release；
+- 产物：`表格汇总助手-vX.Y.Z-windows-x64.zip`，解压双击「启动.bat」即用。
 
 ## 15. 后续可扩展
 

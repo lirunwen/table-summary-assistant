@@ -5,12 +5,12 @@ import csv
 from pathlib import Path
 
 from . import db
-from .config import LIBRARY_DIR, SUPPORTED
+from .config import LIBRARY_DIR, LIMIT_ATTACHMENT_MB, LIMIT_UPLOAD_MB, SUPPORTED
 from .email_reader import parse_mail
 from .readers import table_for_csv, tables_for_excel
 from .utils import UserError, now_iso, safe_filename, uid
 
-MAIL_ATTACHMENT_LIMIT = 50 * 1024 * 1024
+MAIL_ATTACHMENT_LIMIT = LIMIT_ATTACHMENT_MB * 1024 * 1024
 
 
 def kind_of(path: Path) -> str:
@@ -170,6 +170,19 @@ def ingest_upload(file_storage, parent_id: str | None = None) -> list[dict]:
         raise UserError("暂不支持直接读取 .pst / .ost。请在 Outlook 中将需要的邮件另存为 .msg 后再上传。")
     if suffix not in SUPPORTED:
         raise UserError(f"「{filename}」格式不支持，请上传 Excel、CSV 或 Outlook 邮件文件。")
+    # 先量体积再落盘：以前是先 save() 写满磁盘再拒绝
+    limit = LIMIT_UPLOAD_MB * 1024 * 1024
+    try:
+        file_storage.stream.seek(0, 2)
+        size_hint = file_storage.stream.tell()
+        file_storage.stream.seek(0)
+    except Exception:
+        size_hint = -1
+    if size_hint == 0:
+        raise UserError(f"「{filename}」是空文件。")
+    if size_hint > limit:
+        raise UserError(f"「{filename}」超过 {LIMIT_UPLOAD_MB} MB，请拆分后再上传。")
+
     source_id = uid("s_")
     source_dir = LIBRARY_DIR / source_id
     source_dir.mkdir(parents=True, exist_ok=True)
@@ -178,9 +191,9 @@ def ingest_upload(file_storage, parent_id: str | None = None) -> list[dict]:
     if target.stat().st_size == 0:
         target.unlink(missing_ok=True)
         raise UserError(f"「{filename}」是空文件。")
-    if target.stat().st_size > 100 * 1024 * 1024:
+    if target.stat().st_size > limit:
         target.unlink(missing_ok=True)
-        raise UserError(f"「{filename}」超过 100 MB，请拆分后再上传。")
+        raise UserError(f"「{filename}」超过 {LIMIT_UPLOAD_MB} MB，请拆分后再上传。")
     try:
         return ingest_path(target, filename, parent_id=parent_id)
     except Exception:

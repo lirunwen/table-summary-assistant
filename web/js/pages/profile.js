@@ -336,6 +336,11 @@ export default {
                 <input type="checkbox" data-option="dedupe" ${config.options?.dedupe !== false ? 'checked' : ''}>
                 <span class="switch-track"></span>
                 <span class="switch-label">主键重复时只保留第一行</span>
+              </label>
+              <label class="switch">
+                <input type="checkbox" data-option="skip_empty_key" ${config.options?.skip_empty_key === true ? 'checked' : ''}>
+                <span class="switch-track"></span>
+                <span class="switch-label">主键为空的行不输出</span>
               </label>` : `
               <label class="switch">
                 <input type="checkbox" data-option="auto_by_name" ${config.auto_by_name !== false ? 'checked' : ''}>

@@ -10,6 +10,7 @@ import sys
 import traceback
 from functools import wraps
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from flask import Flask, jsonify, request, send_file, send_from_directory
 
@@ -20,6 +21,7 @@ from .config import (
     APP_VERSION,
     COMPARE_DIR,
     DATA_DIR,
+    LIMIT_REQUEST_MB,
     RUN_DIR,
     TMP_DIR,
     WEB_DIR,
@@ -51,7 +53,7 @@ def default_config(mode: str = "join") -> dict:
             "columns": [],
         },
         "mappings": {},
-        "options": {"dedupe": True, "skip_empty_key": True},
+        "options": {"dedupe": True, "skip_empty_key": False},
     }
 
 
@@ -201,9 +203,34 @@ def _cleanup_compares(days: int = 30) -> int:
 
 def create_app(port: int | None = None, host: str = "127.0.0.1") -> Flask:
     app = Flask(__name__, static_folder=None)
-    app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024
-    app.config["JSON_AS_ASCII"] = False
+    app.config["MAX_CONTENT_LENGTH"] = LIMIT_REQUEST_MB * 1024 * 1024
     app.json.ensure_ascii = False
+    loopback_only = host in ("127.0.0.1", "localhost", "::1")
+
+    @app.before_request
+    def guard_local_service():
+        """只接受"本机页面"的写操作。
+
+        没有这道校验时，任意网页都能向 127.0.0.1:8765 提交 multipart 表单
+        （简单请求免预检），把文件塞进数据目录或直接 POST /api/cleanup
+        清空历史记录。Host 校验同时挡住 DNS rebinding。
+        """
+        if not request.path.startswith("/api/"):
+            return None
+        if loopback_only:
+            hostname = (urlsplit(f"//{request.host}").hostname or "").lower()
+            if hostname not in ("127.0.0.1", "localhost", "::1"):
+                return jsonify({"ok": False, "error": "仅允许本机访问。"}), 403
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            origin = request.headers.get("Origin")
+            if origin:
+                allowed = {f"http://{request.host}", f"https://{request.host}"}
+                if origin not in allowed:
+                    return jsonify({"ok": False, "error": "拒绝跨站请求。"}), 403
+            site = request.headers.get("Sec-Fetch-Site")
+            if site and site not in ("same-origin", "none"):
+                return jsonify({"ok": False, "error": "拒绝跨站请求。"}), 403
+        return None
 
     @app.after_request
     def security_headers(resp):
@@ -300,9 +327,13 @@ def create_app(port: int | None = None, host: str = "127.0.0.1") -> Flask:
         table_id = payload.get("table_id")
         header_row = payload.get("header_row")
         if table_id and header_row is not None:
-            key = table_id.split("::")[-1]
             tables = source["meta"].get("tables") or []
-            table = next((t for t in tables if t.get("id") == table_id or t.get("key") == key), None)
+            # 优先按完整表 ID 精确匹配；只有当传入的是裸 key（不含 "::"）时
+            # 才回退按 key 匹配。否则传别的数据源的 ::s0 会误改本源的表。
+            if "::" in table_id:
+                table = next((t for t in tables if t.get("id") == table_id), None)
+            else:
+                table = next((t for t in tables if t.get("key") == table_id), None)
             if not table:
                 raise UserError("找不到要调整的数据表。")
             try:
@@ -320,7 +351,6 @@ def create_app(port: int | None = None, host: str = "127.0.0.1") -> Flask:
             return {"source": _public_source(source), "table": {
                 k: v for k, v in updated.items() if k != "path"
             }}
-        db.execute("UPDATE sources SET name=? WHERE id=?", (source["name"], source_id))
         return {"source": _public_source(source)}
 
     @app.delete("/api/sources/<source_id>")
@@ -342,6 +372,17 @@ def create_app(port: int | None = None, host: str = "127.0.0.1") -> Flask:
             raise UserError("数据表不存在或已删除。")
         source, table = registry.get(table_id)
         headers, rows, truncated = registry.data(table_id)
+        # 全空列探测：openpyxl 用 data_only=True 读的是公式缓存值，
+        # 从未在 Excel 里打开过的文件，公式列会整列为空且不报错。
+        # 这里扫前 5000 行给出提示，比让用户自己发现"这列怎么是空的"好。
+        scan = rows[:5000]
+        empty_cols = [
+            headers[i] for i in range(len(headers))
+            if scan and all(
+                (r[i] is None or str(r[i]).strip() == "") if i < len(r) else True
+                for r in scan
+            )
+        ][:8]
         return {
             "table_id": table_id,
             "label": registry.label(table_id),
@@ -351,6 +392,8 @@ def create_app(port: int | None = None, host: str = "127.0.0.1") -> Flask:
             "shown": min(limit, len(rows)),
             "header_row": table.get("header_row"),
             "truncated": truncated,
+            "empty_columns": empty_cols,
+            "scanned_rows": len(scan),
             "source_id": source["id"],
         }
 
@@ -500,6 +543,7 @@ def create_app(port: int | None = None, host: str = "127.0.0.1") -> Flask:
                 "headers": output["headers"],
                 "sheet": output["sheet"],
                 "header_row": output["header_row"],
+                "data_start": output.get("data_start"),
                 "columns": output.get("columns") or [],
                 "size": output["size"],
             },

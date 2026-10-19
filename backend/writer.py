@@ -60,8 +60,15 @@ def _date_format() -> str:
             "yyyy年mm月dd日": "yyyy年mm月dd日"}.get(fmt, "yyyy-mm-dd")
 
 
-def _apply_number_format(cell, col_type: str, value: Any):
-    if col_type == "date" and isinstance(value, (dt.date, dt.datetime)):
+def _is_percent_source(value: Any) -> bool:
+    """源值是否是 "50%" 这类百分比文本（coerce_number 会把它折成 0.5）。"""
+    return isinstance(value, str) and value.strip().endswith("%")
+
+
+def _apply_number_format(cell, col_type: str, value: Any, percent: bool = False):
+    if percent and isinstance(value, (int, float)) and not isinstance(value, bool):
+        cell.number_format = "0.00%"
+    elif col_type == "date" and isinstance(value, (dt.date, dt.datetime)):
         cell.number_format = _date_format()
     elif col_type == "number" and isinstance(value, (int, float)) and not isinstance(value, bool):
         cell.number_format = "#,##0.##"
@@ -123,7 +130,7 @@ def _blank_workbook(output: Path, headers: list[str], rows: list[list[Any]],
             cell.font = BODY_FONT
             cell.border = BORDER
             cell.alignment = Alignment(vertical="center", wrap_text=False)
-            _apply_number_format(cell, col_type, cell_value)
+            _apply_number_format(cell, col_type, cell_value, _is_percent_source(value))
             if r % 2 == 0:
                 cell.fill = ZEBRA_FILL
 
@@ -161,7 +168,7 @@ def _blank_workbook(output: Path, headers: list[str], rows: list[list[Any]],
         info.cell(row=row, column=2).alignment = Alignment(vertical="top", wrap_text=True)
 
     wb.save(output)
-    return {"sheet": sheet_name, "header_row": 1, "headers": headers,
+    return {"sheet": sheet_name, "header_row": 1, "data_start": 2, "headers": headers,
             "columns": list(range(1, len(headers) + 1))}
 
 
@@ -184,13 +191,23 @@ def _find_last_data_row(ws: Worksheet, columns: list[int], start: int) -> int:
 
 
 def _set_safe(cell, value):
-    """写入值，并阻止以 = + - @ 开头的文本被 Excel 当成公式。"""
+    """写入值，并阻止以 = + - @ 开头的文本被 Excel 当成公式。
+
+    前导空白/换行会被 Excel 忽略，攻击者可用 "\\t=cmd" 绕过前缀判断，
+    所以先 lstrip 再判断；命中时用 quotePrefix 强制文本（比改 data_type 稳）。
+    """
     cell.value = value
-    if isinstance(value, str) and value.startswith(("=", "+", "@")):
-        try:
-            cell.data_type = "s"
-        except Exception:
-            pass
+    if isinstance(value, str):
+        probe = value.lstrip(" \t\r\n")
+        if probe.startswith(("=", "+", "-", "@")):
+            try:
+                cell.quotePrefix = True
+            except Exception:
+                pass
+            try:
+                cell.data_type = "s"
+            except Exception:
+                pass
 
 
 def _template_workbook(template_path: Path, output: Path, headers: list[str],
@@ -264,7 +281,7 @@ def _template_workbook(template_path: Path, output: Path, headers: list[str],
                 _set_safe(cell, cell_value)
             except AttributeError:
                 raise UserError(f"模板数据区存在合并单元格（第 {r} 行第 {col} 列），请先取消合并。")
-            _apply_number_format(cell, col_type, cell_value)
+            _apply_number_format(cell, col_type, cell_value, _is_percent_source(value))
             if r > old_max:
                 # 复制模板首行数据区的样式，让新增行保持原有观感
                 try:
@@ -305,6 +322,9 @@ def write_output(config: dict, result: dict, run_dir: Path, profile_name: str,
         "size": output.stat().st_size,
         "sheet": info.get("sheet"),
         "header_row": info.get("header_row"),
+        # data_start 用于数据对比定位"这次真正写入的第一行"。
+        # append 模式下模板原有行在此之前，不能算进本次结果。
+        "data_start": info.get("data_start") or int(info.get("header_row") or 1) + 1,
         "headers": result["headers"],
         "columns": info.get("columns") or list(range(1, len(result["headers"]) + 1)),
     }
