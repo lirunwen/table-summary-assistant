@@ -481,25 +481,26 @@ export default {
       const template = targetTemplate();
       const cols = config.target.columns || [];
       const included = cols.filter((c) => c.included !== false);
+      const isTemplate = config.target.kind === 'template';
       return `
         <section class="section-card" id="section-target">
           <div class="section-head">
             <span class="section-num">2</span>
             <div class="section-head-main">
               <h3>目标表</h3>
-              <p>${config.target.kind === 'template'
-                ? '沿用现有 Excel 模板的列顺序与格式，只把数据写进去。'
-                : '没有模板时，会新建一张干净的汇总工作簿。'}</p>
+              <p>${isTemplate
+                ? `<span class="chip chip-plain">${icon('file-spreadsheet')}Excel 模板</span> 沿用模板的表头、列宽与格式，只把数据写进数据区。`
+                : `<span class="chip chip-gold">${icon('table')}新建工作簿</span> 还没有用模板，输出时会新建一张干净的汇总表。`}</p>
             </div>
             <div class="section-head-actions">
-              ${config.target.kind === 'template'
+              ${isTemplate
                 ? `<button class="btn btn-secondary btn-sm" type="button" data-change-template>${icon('refresh')}更换模板</button>`
-                : `<button class="btn btn-secondary btn-sm" type="button" data-change-template>${icon('file-spreadsheet')}使用模板</button>`}
+                : ''}
             </div>
           </div>
-          ${config.target.kind === 'template'
+          ${isTemplate
             ? (template ? renderTemplateBanner(template) : `<div class="warning-note">${icon('alert')}<span>模板已被删除或不可用，请重新选择模板，或移除模板后新建工作簿。</span></div>`)
-            : ''}
+            : renderTemplateCta()}
           <div class="form-grid mt-16 ${config.target.kind === 'template' ? 'cols-3' : ''}">
             <div class="field">
               <label class="field-label" for="target-sheet">输出工作表</label>
@@ -543,12 +544,32 @@ export default {
         </section>`;
     }
 
+    // 没用模板时，用一个明确的行动区替代原来藏在标题右侧的小按钮：
+    // 说明"什么情况下该用模板" + 可选文件格式 + 一键上传入口。
+    function renderTemplateCta() {
+      const count = (state.templates || []).length;
+      return `<div class="template-cta">
+        <div class="template-cta-icon">${icon('file-spreadsheet')}</div>
+        <div class="template-cta-main">
+          <strong>要填进公司固定格式的表格？用 Excel 模板</strong>
+          <p>上传 .xlsx / .xlsm 模板，程序自动识别表头行与列名，只把数据写进数据区；列宽、配色、合并单元格、公式列都原样保留。</p>
+        </div>
+        <div class="template-cta-actions">
+          <button class="btn btn-primary btn-sm" type="button" data-change-template>${icon('upload')}上传 / 选择模板</button>
+          <span class="tiny faint">${count ? `模板库已有 ${count} 份，可直接选` : '第一次用？上传后所有方案都能复用'}</span>
+        </div>
+      </div>`;
+    }
+
     function renderTemplateBanner(template) {
+      const writeMode = config.target.write_mode === 'append' ? '追加到已有数据之后' : '覆盖模板数据区';
+      const headerRow = config.target.header_row || 1;
+      const writeCols = (config.target.columns || []).filter((c) => c.included !== false).length;
       return `<div class="template-banner">
         <div class="file-badge template">${icon('file-spreadsheet')}</div>
         <div class="template-banner-main">
           <strong>${esc(template.name)}</strong>
-          <p>工作表「${esc(config.target.sheet)}」 · 第 ${config.target.header_row || 1} 行表头 · 模板文件保存在本机</p>
+          <p>工作表「${esc(config.target.sheet)}」 · 第 ${headerRow} 行表头 · 写入 ${writeCols} 列 · ${writeMode}</p>
         </div>
         <button class="btn btn-secondary btn-sm" type="button" data-remove-template>移除模板</button>
       </div>`;
@@ -891,8 +912,10 @@ export default {
         });
       });
 
-      // 目标表
-      view.querySelector('[data-change-template]')?.addEventListener('click', openTemplateDialog);
+      // 目标表（入口可能同时存在两处：区块标题旁 + 未用模板时的行动区）
+      view.querySelectorAll('[data-change-template]').forEach((btn) => {
+        btn.addEventListener('click', openTemplateDialog);
+      });
       view.querySelector('[data-remove-template]')?.addEventListener('click', removeTemplate);
       view.querySelector('[data-adjust-header]')?.addEventListener('click', openAdjustHeader);
       view.querySelector('[data-write-mode]')?.addEventListener('change', (e) => {

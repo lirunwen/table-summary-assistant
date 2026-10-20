@@ -128,11 +128,13 @@ export function applyTemplateToTarget(config, template, sheet) {
 
 export function openCreateProfileModal({ onCreated } = {}) {
   const templates = state.templates || [];
-  const templateOptions = templates.map((t) => {
-    const sheetCount = t.meta?.sheets?.length || 0;
-    return `<option value="${attr(t.id)}">${esc(t.name)}（${sheetCount} 个工作表）</option>`;
-  }).join('');
   let mode = 'join';
+  // 输出方式三选一：新建空白表 / 用已有模板 / 上传新模板。
+  // 默认值很关键——已经上传过模板就默认选中最近一份，
+  // 否则用户填完名字直接点「创建」，模板永远不会生效。
+  let outputMode = templates.length ? 'template' : 'blank';
+  let templateId = templates[0]?.id || '';
+  let sheetName = templates[0]?.meta?.sheets?.[0]?.name || '';
   const ref = openModal({
     title: '新建汇总方案',
     sub: '一个方案对应一项固定的汇总工作，可以反复使用。',
@@ -161,27 +163,177 @@ export function openCreateProfileModal({ onCreated } = {}) {
         </div>
       </div>
       <div class="field mt-18">
-        <label class="field-label" for="np-template">目标 Excel 模板（可选）</label>
-        <select class="select" id="np-template">
-          <option value="">先不使用模板，稍后在方案里设置</option>
-          ${templateOptions}
-        </select>
-        <div class="field-hint">如果汇总结果要填进公司固定格式的表格，选择已有模板；也可以创建后在方案里上传。</div>
-      </div>
-      ${templates.length === 0 ? `<div class="rail-tip mt-14">${icon('info')}<span>还没有上传过模板。创建方案后，可以在「目标表」里上传带格式的 Excel 模板。</span></div>` : ''}`,
+        <span class="field-label">汇总结果写到哪里？</span>
+        <div class="mode-grid output-grid" data-output-grid>
+          <label class="mode-option" data-output="blank">
+            <span class="mode-icon">${icon('table')}</span>
+            <span class="mode-main"><strong>新建空白表</strong><p>程序生成一张干净的汇总表，列名按你配置的目标列。</p></span>
+            <span class="mode-check">${icon('check')}</span>
+          </label>
+          <label class="mode-option" data-output="template">
+            <span class="mode-icon">${icon('file-spreadsheet')}</span>
+            <span class="mode-main"><strong>用已有模板</strong><p>沿用模板的表头、列宽、颜色和公式，只把数据填进去。</p></span>
+            <span class="mode-check">${icon('check')}</span>
+          </label>
+          <label class="mode-option" data-output="upload">
+            <span class="mode-icon">${icon('upload')}</span>
+            <span class="mode-main"><strong>上传新模板</strong><p>现在就把公司格式的表传进来，之后所有方案都能复用。</p></span>
+            <span class="mode-check">${icon('check')}</span>
+          </label>
+        </div>
+        <div class="mt-14" data-output-panel></div>
+      </div>`,
     footer: `
       <button class="btn btn-secondary" type="button" data-cancel>取消</button>
       <button class="btn btn-primary" type="button" data-create>${icon('plus')}创建方案</button>`,
   });
 
-  ref.modal.querySelectorAll('.mode-option').forEach((option) => {
+  ref.modal.querySelectorAll('[data-mode-grid] .mode-option').forEach((option) => {
     option.addEventListener('click', () => {
       mode = option.dataset.mode;
-      ref.modal.querySelectorAll('.mode-option').forEach((el) => {
+      ref.modal.querySelectorAll('[data-mode-grid] .mode-option').forEach((el) => {
         el.classList.toggle('selected', el === option);
       });
     });
   });
+
+  // ---------- 汇总结果写到哪里 ----------
+  const panel = ref.modal.querySelector('[data-output-panel]');
+
+  const currentTemplate = () => (state.templates || []).find((t) => t.id === templateId) || null;
+  const currentSheet = (template = currentTemplate()) => (
+    (template?.meta?.sheets || []).find((s) => s.name === sheetName) || null
+  );
+
+  const ruleList = (headerRow) => `
+    <div class="rule-list">
+      <div class="rule-item">${icon('table')}<span>只写<b>数据区</b>：从第 ${headerRow + 1} 行开始，第 ${headerRow} 行表头保持原样</span></div>
+      <div class="rule-item">${icon('layers')}<span>列宽、配色、合并单元格、公式列全部保留；没勾选「纳入」的列不会被覆盖</span></div>
+      <div class="rule-item">${icon('save')}<span>输出的是新文件（汇总_方案名_时间.xlsx），你的模板原件不会被改动</span></div>
+    </div>`;
+
+  async function onUploadTemplate(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const restore = withButtonLoading(panel.querySelector('[data-pick-file]'), '上传中…');
+    try {
+      const data = await api.uploadTemplate(file);
+      await loadBootstrap();
+      templateId = data.template.id;
+      sheetName = data.template.meta?.sheets?.[0]?.name || '';
+      outputMode = 'template';
+      renderOutputPanel();
+      toast(`模板「${data.template.name}」已上传并选中。`, 'ok');
+    } catch (err) {
+      toast(err.message, 'error');
+      restore();
+    }
+  }
+
+  function renderOutputPanel() {
+    ref.modal.querySelectorAll('[data-output-grid] .mode-option').forEach((el) => {
+      el.classList.toggle('selected', el.dataset.output === outputMode);
+    });
+
+    if (outputMode === 'blank') {
+      panel.innerHTML = `<div class="field-hint">程序会新建一张工作簿（工作表名可在方案里改）。之后随时可以在方案里换成模板，已有的列配置不会丢。</div>`;
+      return;
+    }
+
+    if (outputMode === 'upload') {
+      panel.innerHTML = `
+        <div class="template-cta">
+          <div class="template-cta-icon">${icon('upload')}</div>
+          <div class="template-cta-main">
+            <strong>上传一份 Excel 模板</strong>
+            <p>支持 .xlsx / .xlsm / .xltx / .xltm；.xls 旧格式请先在 Excel 里另存为新格式。表头行会自动识别，之后可以手动调整。</p>
+          </div>
+          <button class="btn btn-primary btn-sm" type="button" data-pick-file>${icon('upload')}选择文件</button>
+        </div>
+        <input type="file" id="np-tpl-file" accept=".xlsx,.xlsm,.xltx,.xltm" hidden>`;
+      panel.querySelector('[data-pick-file]').addEventListener('click', () => panel.querySelector('#np-tpl-file').click());
+      panel.querySelector('#np-tpl-file').addEventListener('change', onUploadTemplate);
+      return;
+    }
+
+    const template = currentTemplate();
+    if (!template) {
+      panel.innerHTML = `<div class="warning-note">${icon('alert')}<span>模板库里还没有模板。<a href="#" data-go-upload>现在上传一份</a>，或者改用「新建空白表」。</span></div>`;
+      panel.querySelector('[data-go-upload]').addEventListener('click', (e) => {
+        e.preventDefault();
+        outputMode = 'upload';
+        renderOutputPanel();
+      });
+      return;
+    }
+    const sheets = template.meta?.sheets || [];
+    if (!sheets.some((s) => s.name === sheetName)) sheetName = sheets[0]?.name || '';
+    const sheet = currentSheet(template);
+    panel.innerHTML = `
+      <div class="form-grid cols-2">
+        <div class="field">
+          <label class="field-label" for="np-template">模板</label>
+          <select class="select" id="np-template">
+            ${(state.templates || []).map((t) => `<option value="${attr(t.id)}" ${t.id === templateId ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field">
+          <label class="field-label" for="np-sheet">使用哪个工作表</label>
+          ${sheets.length > 1
+            ? `<select class="select" id="np-sheet">
+                 ${sheets.map((s) => `<option value="${attr(s.name)}" ${s.name === sheetName ? 'selected' : ''}>${esc(s.name)}（${(s.headers || []).length} 列）</option>`).join('')}
+               </select>`
+            : `<input class="input" id="np-sheet" value="${attr(sheetName)}" readonly>`}
+        </div>
+      </div>
+      ${sheet ? `<div class="tpl-summary mt-12">
+        <div class="tpl-summary-head">${icon('file-spreadsheet')}
+          <strong>${esc(sheet.name)}</strong>
+          <span class="tiny faint">第 ${sheet.header_row} 行表头 · ${(sheet.headers || []).length} 列 · ${fmtNumber(sheet.row_count || 0)} 行示例数据</span>
+        </div>
+        <div class="flex flex-wrap gap-6 mt-8">
+          ${(sheet.headers || []).slice(0, 8).map((h) => `<span class="chip chip-plain">${esc(h)}</span>`).join('')}
+          ${(sheet.headers || []).length > 8 ? `<span class="chip">+${sheet.headers.length - 8}</span>` : ''}
+        </div>
+      </div>${ruleList(sheet.header_row || 1)}` : `<div class="warning-note">${icon('alert')}<span>这份模板里没有识别到表头行，请换一份模板或换个工作表。</span></div>`}
+      <div class="mt-10"><button class="btn btn-ghost btn-sm" type="button" data-go-upload>${icon('upload')}改上传一份新模板</button></div>`;
+
+    panel.querySelector('#np-template').addEventListener('change', (e) => {
+      templateId = e.target.value;
+      sheetName = currentTemplate()?.meta?.sheets?.[0]?.name || '';
+      renderOutputPanel();
+    });
+    panel.querySelector('#np-sheet')?.addEventListener('change', (e) => {
+      sheetName = e.target.value;
+      renderOutputPanel();
+    });
+    panel.querySelector('[data-go-upload]').addEventListener('click', () => {
+      outputMode = 'upload';
+      renderOutputPanel();
+    });
+  }
+
+  // 小屏幕上弹窗内容比可视区高：切换输出方式后把面板滚进视野，
+  // 否则用户点了「用已有模板」却看不到下面展开的摘要和规则。
+  function revealPanel() {
+    const body = ref.modal.querySelector('.modal-body');
+    if (!body) return;
+    const panelRect = panel.getBoundingClientRect();
+    const bodyRect = body.getBoundingClientRect();
+    if (panelRect.bottom > bodyRect.bottom) {
+      body.scrollTo({ top: body.scrollTop + (panelRect.top - bodyRect.top) - 14, behavior: 'smooth' });
+    }
+  }
+
+  ref.modal.querySelectorAll('[data-output-grid] .mode-option').forEach((el) => {
+    el.addEventListener('click', () => {
+      outputMode = el.dataset.output;
+      renderOutputPanel();
+      revealPanel();
+    });
+  });
+  renderOutputPanel();
+
   ref.modal.querySelector('[data-cancel]').addEventListener('click', ref.close);
   const nameInput = ref.modal.querySelector('#np-name');
   setTimeout(() => nameInput.focus(), 60);
@@ -193,8 +345,21 @@ export function openCreateProfileModal({ onCreated } = {}) {
       nameInput.focus();
       return;
     }
-    const templateId = ref.modal.querySelector('#np-template').value;
-    const template = state.templates.find((t) => t.id === templateId);
+    // 模板按「当前面板的选择」取，而不是回读 DOM——面板是动态重建的
+    let template = null;
+    let sheet = null;
+    if (outputMode !== 'blank') {
+      template = currentTemplate();
+      if (!template) {
+        toast('请先选择或上传一个模板，或者改用「新建空白表」。', 'warn');
+        return;
+      }
+      sheet = currentSheet(template);
+      if (!sheet) {
+        toast('这份模板里没有可用的工作表，请换一份模板。', 'warn');
+        return;
+      }
+    }
     const config = {
       mode,
       primary_table: '',
@@ -209,15 +374,15 @@ export function openCreateProfileModal({ onCreated } = {}) {
       mappings: {},
       options: { dedupe: true, skip_empty_key: false },
     };
-    if (template && template.meta?.sheets?.length) {
-      applyTemplateToTarget(config, template, template.meta.sheets[0]);
+    if (template && sheet) {
+      applyTemplateToTarget(config, template, sheet);
     }
     const restore = withButtonLoading(event.currentTarget, '创建中…');
     try {
       const data = await api.createProfile({ name, mode, config });
       await loadBootstrap();
       ref.close();
-      toast('方案已创建，接下来选择数据来源。', 'ok');
+      toast(template ? `方案已创建，目标模板「${template.name}」已挂上。` : '方案已创建，接下来选择数据来源。', 'ok');
       if (onCreated) onCreated(data.profile);
     } catch (err) {
       toast(err.message, 'error');
