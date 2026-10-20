@@ -123,24 +123,49 @@ jobs:
           Write-Host "产物大小: $mb MB"
           "ZIP_MB=$mb" >> $env:GITHUB_ENV
 
+          # 校验信息：一起发布 .sha256，Windows 上可用
+          #   certutil -hashfile 文件名.zip SHA256
+          # 对照，或 PowerShell 的 Get-FileHash。
+          $hash = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower()
+          $leaf = Split-Path $zip -Leaf
+          # 注意必须写 ${zip}.sha256：PowerShell 会把 "$zip.sha256" 当成属性访问
+          "$hash  $leaf" | Out-File -FilePath "${zip}.sha256" -Encoding ascii -NoNewline
+          Write-Host "SHA256: $hash"
+          "SHA256=$hash" >> $env:GITHUB_ENV
+          "APP_VER=$ver" >> $env:GITHUB_ENV
+
       - name: 上传构建产物（Artifacts）
         uses: actions/upload-artifact@v4
         with:
           name: 表格汇总助手-windows-x64
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*.sha256
           retention-days: 30
 
       - name: 发布到 Release（仅 tag 触发）
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.zip
+          files: |
+            dist/*.zip
+            dist/*.sha256
           name: ${{ github.ref_name }}
           generate_release_notes: true
           body: |
             ## 下载
 
-            点下方 **Assets** 里的 `TableSummaryAssistant-v*-windows-x64.zip`（${{ env.ZIP_MB }} MB）。
+            点下方 **Assets** 里的 `TableSummaryAssistant-v*-windows-x64.zip`（${{ env.ZIP_MB }} MB），
+            同目录下的 `.sha256` 是校验文件。
+
+            **版本**：`${{ env.APP_VER }}` · **平台**：Windows 10 / 11（64 位，x64）· **格式**：免安装 zip（解压即用，无需管理员权限）
+
+            **SHA256**：`${{ env.SHA256 }}`
+
+            ```bat
+            :: 下载后先校验，输出应与上面一致
+            certutil -hashfile TableSummaryAssistant-v*-windows-x64.zip SHA256
+            ```
 
             解压后双击「启动.bat」（或 `start.bat`）即可，**目标电脑不需要安装 Python，也不需要管理员权限**。
 
