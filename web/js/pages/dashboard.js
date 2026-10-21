@@ -178,7 +178,7 @@ export default {
           <div class="rail-card mt-14" style="background:linear-gradient(150deg,#f8fbf9,#f2f7f4)">
             <div class="rail-title">${icon('shield', 'icon-sm')} 本地与隐私</div>
             <p class="tiny muted" style="line-height:1.7">${exposed
-              ? `服务运行在 OrbStack 虚拟机内，通过本机端口 ${esc(app.port || 8765)} 访问。数据文件保存在 Mac 的 data 目录；验证结束后可停止虚拟机服务。`
+              ? `服务运行在 OrbStack 虚拟机内，通过本机端口 ${esc(app.port || 9090)} 访问。数据文件保存在 Mac 的 data 目录；验证结束后可停止虚拟机服务。`
               : '服务只监听 127.0.0.1，同一内网的其他电脑也访问不到。上传、解析、生成都在本机完成，关闭窗口即停止服务。'}</p>
           </div>
         </section>

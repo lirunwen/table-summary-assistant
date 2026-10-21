@@ -16,7 +16,7 @@
 
 > 这个 zip 由 GitHub Actions 在 `windows-latest` 上自动构建（见 `.github/workflows/build-windows.yml`），
 > 构建前会先跑 `tests/test_regressions.py` 和 `tests/smoke.py`，测试不过就不会出包。
-> 想自己发版：`git tag v0.2.1 && git push origin v0.2.1`，几分钟后 Release 里就有新包。
+> 想自己发版：`git tag v0.2.2 && git push origin v0.2.2`，几分钟后 Release 里就有新包。
 
 ## 给文员的完整使用说明
 
@@ -89,7 +89,7 @@ pip install -r requirements.txt
 python app.py
 ```
 
-浏览器访问 <http://127.0.0.1:8765>。也可以直接双击 `start.bat`（Windows）或运行 `./start.sh`。
+浏览器访问 <http://127.0.0.1:9090>。也可以直接双击 `start.bat`（Windows）或运行 `./start.sh`。
 
 ### 无网络安装 Python 依赖
 
@@ -193,6 +193,20 @@ HUIYI_DATA_DIR="$PWD/data/_demo" python app.py --no-browser
 - 「转为数值」对 `50%` 按数学语义折算成 `0.5`，并自动套百分比格式显示回 `50%`。
 
 ## 更新日志
+
+### 0.2.2
+
+- **默认端口 8765 → 9090**。8765 属于高频冲突段（Jupyter、各类本地 mock server
+  都爱用），首次启动就被挤到 9091 的情况不少。现在默认 9090，打包版启动器
+  （`启动.bat`）显式传 `--port 9090`；若 9090 仍被占用，自动往后找 9091~9119，
+  实际地址以黑色窗口打印的为准。
+- 端口支持环境变量 `HUIYI_PORT` 覆盖（与 `HUIYI_DATA_DIR` 同一套写法）。
+  非数字或越界值会打印提示并回退到 9090，不再直接抛异常。
+- 修 `--help` / 参数错误在英文版 Windows 控制台崩溃：`argparse` 的构造原本早于
+  `_safe_console()`，中文帮助文本在 cp1252 下会抛 `UnicodeEncodeError`。
+  现在先修控制台编码，再解析参数。
+- 同步文档：README、`README-使用说明.txt`、打包版使用说明与 `ARCHITECTURE.md`
+  里的访问地址统一改成 `http://127.0.0.1:9090`。
 
 ### 0.2.1
 

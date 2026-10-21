@@ -211,7 +211,7 @@ def create_app(port: int | None = None, host: str = "127.0.0.1") -> Flask:
     def guard_local_service():
         """只接受"本机页面"的写操作。
 
-        没有这道校验时，任意网页都能向 127.0.0.1:8765 提交 multipart 表单
+        没有这道校验时，任意网页都能向 127.0.0.1:9090 提交 multipart 表单
         （简单请求免预检），把文件塞进数据目录或直接 POST /api/cleanup
         清空历史记录。Host 校验同时挡住 DNS rebinding。
         """

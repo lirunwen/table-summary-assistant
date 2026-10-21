@@ -29,7 +29,7 @@ SAMPLE_DIR = ROOT / "samples"
 @pytest.fixture(scope="session")
 def app():
     db.init_db()
-    application = create_app(port=8765, host="127.0.0.1")
+    application = create_app(port=9090, host="127.0.0.1")
     application.config.update(TESTING=True)
     return application
 

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 VM="${HUIYI_VM:-ubuntu}"
-PORT="${HUIYI_PORT:-8765}"
+PORT="${HUIYI_PORT:-9090}"
 PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if ! orb list 2>/dev/null | awk '{print $1, $2}' | grep -q "^${VM} running"; then

@@ -90,7 +90,7 @@ export default {
               <div class="info-list">
                 <div class="info-row"><span class="k">程序版本</span><span class="v">表格汇总助手 v${esc(app.version || '0.1.0')}</span></div>
                 <div class="info-row"><span class="k">使用方式</span><span class="v">${exposed ? 'OrbStack 虚拟机 + 浏览器界面' : '本机服务 + 浏览器界面'}</span></div>
-                <div class="info-row"><span class="k">监听地址</span><span class="v">${esc(app.host || '127.0.0.1')}:${esc(app.port || 8765)}${exposed ? '（虚拟机）' : ''}</span></div>
+                <div class="info-row"><span class="k">监听地址</span><span class="v">${esc(app.host || '127.0.0.1')}:${esc(app.port || 9090)}${exposed ? '（虚拟机）' : ''}</span></div>
                 <div class="info-row"><span class="k">操作系统</span><span class="v">${esc(app.platform || '—')}</span></div>
                 <div class="info-row"><span class="k">网络依赖</span><span class="v">无 · 全部资源本地化</span></div>
                 <div class="info-row"><span class="k">当前时间</span><span class="v">${fmtDate(new Date().toISOString())}</span></div>

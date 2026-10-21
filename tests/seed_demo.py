@@ -17,7 +17,7 @@ from backend import db  # noqa: E402
 from backend.api import create_app  # noqa: E402
 
 db.init_db()
-app = create_app(port=8765)
+app = create_app(port=9090)
 app.config.update(TESTING=True)
 client = app.test_client()
 samples = ROOT / "samples"

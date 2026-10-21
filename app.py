@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import socket
 import sys
 import threading
@@ -18,6 +19,10 @@ from pathlib import Path
 from backend import db
 from backend.api import create_app
 from backend.config import APP_NAME, APP_SUBTITLE, APP_VERSION, DATA_DIR, LOG_DIR
+
+# 默认端口。改用 9090 是为了避开 8765 这一类被其他开发工具（Jupyter、
+# 各类本地 mock server）高频占用的端口段，减少第一次启动就落到 9091+ 的情况。
+DEFAULT_PORT = 9090
 
 
 def setup_logging():
@@ -90,6 +95,24 @@ def _safe_console() -> None:
             pass
 
 
+def default_port() -> int:
+    """默认端口可由 HUIYI_PORT 覆盖，非法值回退到 DEFAULT_PORT。
+
+    注意：调用点必须在 _safe_console() 之后——这里的 print 含中文，
+    在英文版 Windows（cp1252）控制台会直接抛 UnicodeEncodeError。
+    """
+    raw = os.environ.get("HUIYI_PORT", "").strip()
+    if raw:
+        try:
+            port = int(raw)
+            if 1 <= port <= 65535:
+                return port
+        except ValueError:
+            pass
+        print(f"  注意：环境变量 HUIYI_PORT={raw!r} 不是有效端口，已回退到 {DEFAULT_PORT}。")
+    return DEFAULT_PORT
+
+
 def banner(url: str):
     line = "─" * 48
     print(f"\n  {line}")
@@ -103,14 +126,17 @@ def banner(url: str):
 
 
 def main():
+    # 先修控制台编码，再做任何可能输出中文的动作（argparse 的帮助与报错也是中文）。
+    _safe_console()
+
     parser = argparse.ArgumentParser(description=f"{APP_NAME} · {APP_SUBTITLE}")
-    parser.add_argument("--port", type=int, default=8765, help="服务端口，默认 8765")
+    parser.add_argument("--port", type=int, default=default_port(),
+                        help=f"服务端口，默认 {DEFAULT_PORT}（可用环境变量 HUIYI_PORT 覆盖）")
     parser.add_argument("--host", default="127.0.0.1", help="监听地址，默认仅本机")
     parser.add_argument("--no-browser", action="store_true", help="启动后不自动打开浏览器")
     parser.add_argument("--debug", action="store_true", help="开发模式（Flask 自动重载）")
     args = parser.parse_args()
 
-    _safe_console()
     setup_logging()
     db.init_db()
 
