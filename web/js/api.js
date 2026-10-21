@@ -94,6 +94,24 @@ export const api = {
     return request('/api/preview', { method: 'POST', body: { config, limit } });
   },
 
+  formulaHelp() {
+    return request('/api/formula/help');
+  },
+
+  formulaCheck(formula, tableIds) {
+    return request('/api/formula/check', {
+      method: 'POST',
+      body: { formula, table_ids: tableIds },
+    });
+  },
+
+  formulaTry(formula, tableId, limit = 5) {
+    return request('/api/formula/try', {
+      method: 'POST',
+      body: { formula, table_id: tableId, limit },
+    });
+  },
+
   run(profileId, config, name) {
     return request(`/api/profiles/${encodeURIComponent(profileId)}/run`, {
       method: 'POST',

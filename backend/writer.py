@@ -68,22 +68,50 @@ def _date_format() -> str:
             "yyyy年mm月dd日": "yyyy年mm月dd日"}.get(fmt, "yyyy-mm-dd")
 
 
+# 列级日期格式：界面上的展示名 → Excel 自定义格式代码。
+# 中文年月日要用双引号包住字面量，否则 Excel 会把它当格式保留字符。
+DATE_FORMATS: dict[str, str] = {
+    "YYYY-MM-DD": "yyyy-mm-dd",
+    "YYYY/M/D": "yyyy/m/d",
+    "YYYY年M月D日": 'yyyy"年"m"月"d"日"',
+    "YYYY-MM-DD HH:mm": "yyyy-mm-dd hh:mm",
+    "YYYY-MM": "yyyy-mm",
+    "M月D日": 'm"月"d"日"',
+    "YYYYMMDD": "yyyymmdd",
+    "DD/MM/YYYY": "dd/mm/yyyy",
+    "MM/DD/YYYY": "mm/dd/yyyy",
+}
+DEFAULT_DATE_FORMAT = "YYYY-MM-DD"
+
+
+def _column_date_formats(columns: list[dict], config: dict) -> list[str | None]:
+    """按输出列顺序取出每列配置的日期格式（Excel 格式代码），未配置为 None。"""
+    mappings = config.get("mappings") or {}
+    out: list[str | None] = []
+    for col in columns:
+        mapping = mappings.get(col.get("key")) or {}
+        raw = str(mapping.get("date_format") or "").strip()
+        out.append(DATE_FORMATS.get(raw) if raw else None)
+    return out
+
+
 def _is_percent_source(value: Any) -> bool:
     """源值是否是 "50%" 这类百分比文本（coerce_number 会把它折成 0.5）。"""
     return isinstance(value, str) and value.strip().endswith("%")
 
 
-def _apply_number_format(cell, col_type: str, value: Any, percent: bool = False):
+def _apply_number_format(cell, col_type: str, value: Any, percent: bool = False,
+                         date_fmt: str | None = None):
     if percent and isinstance(value, (int, float)) and not isinstance(value, bool):
         cell.number_format = "0.00%"
     elif col_type == "date" and isinstance(value, (dt.date, dt.datetime)):
-        cell.number_format = _date_format()
+        cell.number_format = date_fmt or _date_format()
     elif col_type == "number" and isinstance(value, (int, float)) and not isinstance(value, bool):
         cell.number_format = "#,##0.##"
     elif isinstance(value, dt.datetime):
-        cell.number_format = "yyyy-mm-dd hh:mm"
+        cell.number_format = date_fmt or "yyyy-mm-dd hh:mm"
     elif isinstance(value, dt.date):
-        cell.number_format = _date_format()
+        cell.number_format = date_fmt or _date_format()
 
 
 def _display_len(value: Any) -> int:
@@ -120,6 +148,7 @@ def _blank_workbook(output: Path, headers: list[str], rows: list[list[Any]],
                if c.get("included", True) and str(c.get("name") or "").strip()]
     types = [c.get("type") or "auto" for c in columns]
     widths_conf = {c.get("name"): c.get("width") for c in columns if c.get("width")}
+    date_fmts = _column_date_formats(columns, config)
 
     for i, header in enumerate(headers, start=1):
         cell = ws.cell(row=1, column=i, value=header)
@@ -139,7 +168,8 @@ def _blank_workbook(output: Path, headers: list[str], rows: list[list[Any]],
             cell.font = BODY_FONT
             cell.border = BORDER
             cell.alignment = BODY_ALIGN
-            _apply_number_format(cell, col_type, cell_value, _is_percent_source(value))
+            _apply_number_format(cell, col_type, cell_value, _is_percent_source(value),
+                                 date_fmts[c - 1] if c - 1 < len(date_fmts) else None)
             if zebra is not None:
                 cell.fill = zebra
 
@@ -231,6 +261,7 @@ def _template_workbook(template_path: Path, output: Path, headers: list[str],
     columns = [c for c in target.get("columns", [])
                if c.get("included", True) and str(c.get("name") or "").strip()]
     types = [c.get("type") or "auto" for c in columns]
+    date_fmts = _column_date_formats(columns, config)
 
     suffix = template_path.suffix.lower()
     keep_vba = suffix == ".xlsm"
@@ -294,7 +325,8 @@ def _template_workbook(template_path: Path, output: Path, headers: list[str],
                 _set_safe(cell, cell_value)
             except AttributeError:
                 raise UserError(f"模板数据区存在合并单元格（第 {r} 行第 {col} 列），请先取消合并。")
-            _apply_number_format(cell, col_type, cell_value, _is_percent_source(value))
+            _apply_number_format(cell, col_type, cell_value, _is_percent_source(value),
+                                 date_fmts[c_offset] if c_offset < len(date_fmts) else None)
             if r > old_max:
                 # 复制模板首行数据区的样式，让新增行保持原有观感
                 try:

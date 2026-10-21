@@ -1,6 +1,7 @@
 """HTTP API 与应用装配。"""
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import os
 import platform
@@ -28,10 +29,11 @@ from .config import (
 )
 from .diff import compare, export_compare
 from .engine import Registry, build, validate_config
+from .formula import FUNCTION_CATALOG, FormulaError, FormulaSyntaxError, compile_formula
 from .ingest import delete_source, ingest_upload
 from .templates import delete_template, ingest_template, inspect_sheet, template_by_id
-from .utils import UserError, now_iso, safe_filename, uid
-from .writer import write_output
+from .utils import UserError, display_value, now_iso, safe_filename, uid
+from .writer import DATE_FORMATS, DEFAULT_DATE_FORMAT, write_output
 
 log = logging.getLogger("huiyi")
 
@@ -501,6 +503,115 @@ def create_app(port: int | None = None, host: str = "127.0.0.1") -> Flask:
         new_row = db.query_one("SELECT * FROM profiles WHERE id=?", (new_id,))
         new_row["config"] = db.loads(new_row.get("config"), {})
         return {"profile": _public_profile(new_row)}
+
+    # ---- 字段公式：速查 / 校验 / 试算 -------------------------------------
+    @app.get("/api/formula/help")
+    @api_route
+    def formula_help():
+        """函数速查与日期格式选项。前端只缓存这一份，避免两边各写一套。"""
+        return {
+            "functions": FUNCTION_CATALOG,
+            "date_formats": list(DATE_FORMATS.keys()),
+            "default_date_format": DEFAULT_DATE_FORMAT,
+            "ref_syntax": "[字段名]",
+            "example": "=[单价]*[数量]",
+            "notes": [
+                "公式以 = 开头，省略也可以。",
+                "引用源字段写成 [字段名]，名字要和数据表里的表头一致。",
+                "空值在算术里按 0 计算，在文字拼接里按空字符串。",
+                "计算失败会写入 Excel 错误值（如 #DIV/0!），可用 IFERROR 兜底。",
+            ],
+        }
+
+    def _formula_available_fields(registry: Registry, table_ids: list[str]) -> list[str]:
+        fields: list[str] = []
+        seen: set[str] = set()
+        for tid in table_ids:
+            for header in registry.headers(tid):
+                name = str(header).strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    fields.append(name)
+        return fields
+
+    @app.post("/api/formula/check")
+    @api_route
+    def formula_check():
+        """只做语法与字段引用校验，不需要完整方案配置。"""
+        payload = request.get_json(silent=True) or {}
+        text = str(payload.get("formula") or "")
+        table_ids = [t for t in (payload.get("table_ids") or []) if isinstance(t, str)]
+        registry = Registry()
+        available = _formula_available_fields(registry, table_ids)
+
+        if not text.strip():
+            return {"valid": False, "error": "公式不能为空。可以填 =[字段名] 直接取原值。",
+                    "refs": [], "fields": available}
+        try:
+            compiled = compile_formula(text)
+        except FormulaSyntaxError as exc:
+            return {"valid": False,
+                    "error": f"语法错误：{exc.message}（第 {exc.pos} 个字符附近）",
+                    "refs": [], "fields": available}
+
+        missing = [r for r in compiled.refs if r not in available]
+        if missing:
+            shown = "、".join(f"[{m}]" for m in missing[:3])
+            hint = "、".join(available[:8]) or "（还没有选择数据表）"
+            return {"valid": False,
+                    "error": f"找不到字段 {shown}。可引用：{hint}",
+                    "refs": compiled.refs, "fields": available, "missing": missing}
+        return {"valid": True, "error": None, "refs": compiled.refs,
+                "fields": available, "missing": []}
+
+    @app.post("/api/formula/try")
+    @api_route
+    def formula_try():
+        """用指定表的前几行真算一遍，供编辑器里的实时预览。"""
+        payload = request.get_json(silent=True) or {}
+        text = str(payload.get("formula") or "")
+        table_id = payload.get("table_id")
+        try:
+            limit = max(1, min(20, int(payload.get("limit") or 5)))
+        except (TypeError, ValueError):
+            limit = 5
+        if not text.strip():
+            raise UserError("公式不能为空。")
+        try:
+            compiled = compile_formula(text)
+        except FormulaSyntaxError as exc:
+            raise UserError(f"{exc.message}（第 {exc.pos} 个字符附近）") from exc
+
+        registry = Registry()
+        if not registry.has(table_id):
+            raise UserError("请先选择一张数据表，才能试算公式。")
+        headers, rows, truncated = registry.data(table_id)
+        samples = []
+        for index, row in enumerate(rows[:limit], start=1):
+            fields = {h: (row[i] if i < len(row) else None) for i, h in enumerate(headers)}
+            # 把公式实际用到的输入值一并回传，编辑器里能对照「输入 → 结果」
+            inputs = {}
+            for ref in compiled.refs:
+                raw = fields.get(ref)
+                if isinstance(raw, (dt.date, dt.datetime)):
+                    raw = display_value(raw)
+                inputs[ref] = raw
+            try:
+                value = compiled.evaluate(fields)
+            except FormulaError as exc:
+                samples.append({"row": index, "error": exc.code,
+                                "message": exc.message, "inputs": inputs})
+                continue
+            if isinstance(value, (dt.date, dt.datetime)):
+                value = display_value(value)
+            samples.append({"row": index, "result": value, "inputs": inputs})
+        return {
+            "refs": compiled.refs,
+            "headers": headers,
+            "samples": samples,
+            "total_rows": len(rows),
+            "truncated": truncated,
+        }
 
     @app.post("/api/preview")
     @api_route

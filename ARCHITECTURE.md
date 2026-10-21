@@ -68,6 +68,7 @@ huiyi/
 │  ├─ email_reader.py     .msg / .eml 解析、HTML 表格提取
 │  ├─ ingest.py           落盘、类型分派、邮件附件递归登记、删除
 │  ├─ templates.py        目标模板登记、工作表/表头解析
+│  ├─ formula.py          Excel 风格公式：词法、语法、白名单函数、逐行求值
 │  ├─ engine.py           配置校验、join/append、映射、统计
 │  ├─ writer.py           模板填充或新建工作簿、样式与公式保护
 │  ├─ diff.py             主键对比、差异明细、Excel 报告
@@ -151,6 +152,20 @@ settings(key, value JSON)
       "column_name": "工号",
       "transform": "trim",
       "fallback": ""
+    },
+    "c_x2": {
+      "mode": "table",
+      "table_id": "s_ab12::s0",
+      "column_index": 2,
+      "column_name": "业务日期",
+      "transform": "date",
+      "date_format": "YYYY年M月D日"
+    },
+    "c_x3": {
+      "mode": "table",
+      "formula_on": true,
+      "formula": "=IFERROR([单价]*[数量],0)",
+      "fallback": ""
     }
   },
   "options": { "dedupe": true }
@@ -162,6 +177,20 @@ settings(key, value JSON)
 - `table`：指定数据表 + 列索引，可叠加处理方式与缺省值；
 - `const`：整列固定值；
 - `blank`：显式留空。
+
+每条映射还带两个可选的列级增强字段，二者互不排斥但公式优先：
+
+| 字段 | 类型 | 作用 |
+| --- | --- | --- |
+| `formula_on` | `bool` | 该列是否启用公式。只有显式 `true` 才生效，老方案缺省即关闭 |
+| `formula` | `string` | 公式正文，如 `=[单价]*[数量]`；`formula_on` 为真但正文为空会直接报配置错误 |
+| `date_format` | `string` | 日期列的展示格式键（见 §7），仅在 `transform` 为 `date` 或列类型为 `date` 时参与写入 |
+
+`formula_on` 与 `formula` 拆成两个字段，是为了让「关掉公式但留住内容」不丢配置：
+用户在界面上取消勾选公式后，`formula` 仍留在 JSON 里，下次打开还能接着改。
+
+启用公式的列会**跳过** `mode` / `table_id` / `column_index` / `transform`：
+取值完全由公式决定，来源表只用来提供可引用的字段名（见 §6.4）。
 
 ## 6. 汇总引擎
 
@@ -198,6 +227,81 @@ settings(key, value JSON)
 
 全局"自动清理文本首尾空格"可在设置中关闭。
 
+### 6.4 列公式
+
+映射配了 `formula_on: true` 时，该列的值由公式算出，不再走"取某表某列"的路径。
+实现在 `backend/formula.py`（978 行），分成四层：词法 → 语法 → 编译 → 求值。
+
+**为什么自己写解析器而不是 `eval`**：公式是用户输入的字符串，`eval` 等于把
+`__import__('os').system(...)` 直接交给浏览器里的任何一个同事。白名单函数表 +
+自建 AST 是唯一可接受的做法。同时这也保证了行为可预测——你不可能期望
+`[金额]` 这种方括号引用被 Python 的语法接受。
+
+**词法与语法**
+
+| 记号 | 形式 | 说明 |
+| --- | --- | --- |
+| 字段引用 | `[字段名]` | 名字须与数据表表头完全一致（去首尾空白后比较），支持中文、空格、括号 |
+| 字符串 | `"文本"` | 内部 `""` 表示一个字面双引号 |
+| 数字 | `12` / `3.14` / `-0.5` | 负号由一元运算处理，不属字面量 |
+| 函数调用 | `SUM(...)` | 函数名大小写不敏感，统一转大写 |
+| 参数分隔 | `,` 或 `，` | 中文逗号可直接用，避免输入法切换 |
+| 运算符 | `+ - * / ^ &` `= <> > < >= <=` | `&` 是文本拼接，`^` 右结合 |
+
+优先级从低到高：比较 → `&` → `+ -` → `* /` → `^` → 一元正负 → 原子（数字 / 字符串 /
+字段 / 函数调用 / 括号）。与 Excel 一致，所以 `1&2+3` 得到 `"14"` 而不是 `"15"`。
+
+**函数表（39 个，四大类）**
+
+- 数学计算（11）：`SUM` `MAX` `MIN` `ABS` `INT` `MOD` `POWER` `SQRT`
+  `ROUND` `ROUNDUP` `ROUNDDOWN`
+- 文本处理（11）：`CONCAT` `LEFT` `RIGHT` `MID` `LEN` `TRIM` `UPPER` `LOWER`
+  `SUBSTITUTE` `TEXT` `VALUE`
+- 条件判断（8）：`IF` `IFERROR` `AND` `OR` `NOT` `ISBLANK` `ISNUMBER` `ISERROR`
+- 日期计算（9）：`TODAY` `NOW` `YEAR` `MONTH` `DAY` `DATE` `DAYS` `EDATE` `EOMONTH`
+
+`IF` / `IFERROR` / `ISERROR` 走**惰性求值**，不进 `FUNCTIONS` 表而是单独登记在
+`LAZY_FUNCTIONS`：`IFERROR([数量]/[单价], 0)` 在 `[单价]` 为 0 时不能先抛出
+`#DIV/0!` 再兜底，必须只算被选中的那一支。这也是解析层与求值层分离的直接原因。
+
+**数值与日期的语义约定**
+
+- 空值（`None` / `""`）在算术里按 0 参与，在文本拼接里按空字符串，在 `ISBLANK` 里为真。
+- 日期用 Excel 序列号模型互通，epoch = `1899-12-30`；`TODAY()` 与 `NOW()` 取本机日期。
+- `ROUND` 用 `Decimal` + `ROUND_HALF_UP`：Python 内置 `round()` 是银行家舍入，
+  `round(2.5)` 得 2，会让"四舍五入"的合同数字少一分钱。
+- 错误值直接沿用 Excel 的写法：`#VALUE!`（类型不对）、`#DIV/0!`（除零）、
+  `#REF!`（引用的字段在本行缺失）、`#NAME?`（不认识的函数）、`#NUM!`（数值越界或嵌套过深）。
+
+**性能**：`compile_formula()` 在进入行循环**之前**执行一次，得到 `Formula`
+对象（`__slots__ = ("text", "ast", "refs")`），循环里只做 AST 求值。
+5 万行 × 3 个公式列不会重复词法分析。
+
+**字段可见性**：公式能引用的字段 = 所有参与表表头的并集，重名按"先出现者优先"。
+`join` 路径用 `setdefault` 构造字段字典，关联行缺失时值为 `None` 而不是 `#REF!`——
+Excel 里缺失的单元格是空的，不是错误。`append` 路径先算所有表表头的并集再逐表填，
+因此引用另一张表独有的字段会得到空值；`validate_config` 会对此给出一条 warning
+（"只在部分数据表中存在，缺失的行会写入 #REF!"）。
+
+**配置校验（保存方案时阻断）**
+
+| 情况 | 提示 |
+| --- | --- |
+| `formula_on` 为真但正文为空 | `列「X」启用了公式但内容为空，请填写公式或关闭公式。` |
+| 语法错误 | `列「X」公式语法错误：<原因>（第 N 个字符附近）` |
+| 引用了不存在的字段 | `列「X」公式引用了不存在的字段 [a]。可引用：…（最多列 8 个）` |
+
+**运行期失败（不阻断，落 Excel 错误值并汇总告警）**：单个单元格算不出来不该让整次
+汇总白跑。`_formula_value()` 捕获 `FormulaError` 后返回错误码字符串（Excel 里会被
+识别为错误值），同时按列记账；运行结束拼接成一条 warning：
+
+```text
+列「总额」有 3 个单元格公式计算失败（#DIV/0! ×2、#VALUE! ×1），首个：第 12 行 除数不能为 0。结果里已写入 Excel 错误值，可用 IFERROR 兜底。
+```
+
+这条 warning 会出现在运行结果的提示区，用户能立刻知道"哪一列、多少行、第一个错在哪"，
+而不是打开 Excel 肉眼找 `#VALUE!`。
+
 ## 7. 模板写入
 
 1. 复制模板文件到本次运行的独立目录，绝不原地修改模板；
@@ -207,7 +311,36 @@ settings(key, value JSON)
 5. `append`：找到所有列中最后一个有值的行，把新数据追加到其后；
 6. 新行超出模板已有数据区时，复制首行数据区样式与行高；
 7. 未被纳入映射的模板列保持原样，适合公式列、签字列、手工备注列；
-8. 保存为新的 `.xlsx` / `.xlsm`，文件名带秒级时间戳。
+8. 按列的 `date_format` 套 `number_format`（见下）；
+9. 保存为新的 `.xlsx` / `.xlsm`，文件名带秒级时间戳。
+
+### 列级日期格式
+
+`date_format` 存的是界面上的展示键，写入前由 `DATE_FORMATS` 翻译成 Excel 自定义
+格式代码（`_column_date_formats()` 按输出列顺序取一遍，`_apply_number_format()`
+接收第 5 个参数 `date_fmt`，空白表与模板两条写入路径都传）：
+
+| 界面选项 | Excel 格式代码 | 显示效果 |
+| --- | --- | --- |
+| 跟随全局设置（空字符串） | 不设置，沿用模板/全局 | 取决于模板原有格式 |
+| `YYYY-MM-DD` | `yyyy-mm-dd` | 2026-10-21 |
+| `YYYY/M/D` | `yyyy/m/d` | 2026/10/21 |
+| `YYYY年M月D日` | `yyyy"年"m"月"d"日"` | 2026年10月21日 |
+| `YYYY-MM-DD HH:mm` | `yyyy-mm-dd hh:mm` | 2026-10-21 14:30 |
+| `YYYY-MM` | `yyyy-mm` | 2026-10 |
+| `M月D日` | `m"月"d"日"` | 10月21日 |
+| `YYYYMMDD` | `yyyymmdd` | 20261021 |
+| `DD/MM/YYYY` | `dd/mm/yyyy` | 21/10/2026 |
+| `MM/DD/YYYY` | `mm/dd/yyyy` | 10/21/2026 |
+
+两个细节：
+
+- 中文年月日必须用双引号包住字面量（`yyyy"年"m"月"d"日"`），否则 `年`/`月`/`日`
+  会被 Excel 当作格式保留字符，轻则不显示、重则报格式非法。
+- 写入的是**真日期值 + 显示格式**，不是格式化后的字符串。所以单元格仍然可以排序、
+  参与日期计算、被数据透视表按日期分组——"改成 2026年10月21日"不会把这列变成文本。
+- 同一条格式化规则在前端预览里由 `formatDateByPattern()`（`web/js/pages/profile.js`）
+  复现，token 扫描顺序与后端 `_format_date()` 保持一致；不一致会导致预览与产物对不上。
 
 已知边界：openpyxl 不能完整保留图表、图片、数据透视表等对象；极复杂的模板建议先用 Excel 打开核对一次。模板数据区若有合并单元格，写入会给出明确错误提示。
 
@@ -245,8 +378,16 @@ settings(key, value JSON)
 | GET | `/api/compares/:id/download` | 下载对比报告 |
 | PUT | `/api/settings` | 日期格式、空格清理、保留条数 |
 | POST | `/api/cleanup` | 清理旧运行记录与过期对比报告 |
+| GET | `/api/formula/help` | 函数速查（39 个，分四组）、日期格式键、引用语法与说明 |
+| POST | `/api/formula/check` | 只校验语法与字段引用，不需要完整方案；恒返回 200 |
+| POST | `/api/formula/try` | 取指定表前 N 行（默认 5）真算一遍，返回 `samples[].{row,result,error,message,inputs}` |
 
 统一响应：`{ "ok": true, ... }` 或 `{ "ok": false, "error": "可直接展示的中文错误" }`。
+
+`/api/formula/check` 是个例外：它用 `valid: true|false` 表达结果、HTTP 状态恒为 200，
+因为前端的 `request()` 会把 `ok:false` 抛成异常，而"公式有语法错误"是编辑器里每敲一个键
+都可能出现的正常中间态，不该走异常通道。同理 `/api/formula/try` 里单行算不出来也不报错，
+而是给该行 `error` 与 `message`，让预览表格能一行行标红。
 
 ## 10. 前端设计系统
 
@@ -353,9 +494,18 @@ data/
 - `tests/test_regressions.py`：pytest 单元/回归用例，覆盖已修缺陷——百分比语义、
   日期歧义、数据库连接释放、追加模式对比行数、跨站请求拦截、DNS rebinding、
   公式注入、空主键跳过、单元格上限、按需解析工作表。**CI 必跑，不过不出包。**
+- `tests/test_formula.py`：68 条，覆盖公式求值 42 例（四类函数、优先级、空值语义、
+  惰性求值）、Excel 错误值 4 例、语法错误 7 例（含报错位置）、`engine` 集成 6 例
+  （空公式、坏引用、失败记账、日期结果、append 缺字段）、API 3 例、
+  `writer` 日期格式 5+1 例（含中文格式代码与"跟随全局"）。
 - `tests/smoke.py`：Flask test client 端到端覆盖上传、模板、关联汇总、预览、表头调整、运行、下载、两次结果对比、结果对源表、纵向自动匹配、`.xls`、真实 `.msg`、公式注入、模板追加。
+- `tests/ui/check-formula-mapping.mjs`：23 项浏览器断言，覆盖公式按钮、弹窗、
+  实时校验状态条、试算表、日期格式下拉与预览列格式化。
+- `tests/ui/check-template-entry.mjs`：6 项，守住「模板入口在三张卡片第一层」这个回归。
 - `tests/ui_shot.py`：开发期用 Chrome DevTools Protocol 截图与检查浏览器异常。
 - `samples/make_samples.py`：生成可复现的示例文件。
+
+当前基线：`pytest tests -q` → **116 passed**；两个 UI 巡检脚本 29/29 通过。
 
 ## 14.1 发布流水线
 
@@ -369,7 +519,8 @@ data/
 
 ## 15. 后续可扩展
 
-- 列级转换公式（拼接、截取、查找替换、正则）；
+- 公式函数扩充：`VLOOKUP` / `XLOOKUP`（跨表查值）、`REGEX` 系列、`SUMIF(S)`、
+  文本分列；以及单元格区域引用（`A1:B2`）——当前只支持 `[字段名]` 按列引用；
 - 方案导入/导出与跨电脑共享；
 - 多工作表/多行复杂表头；
 - 数据校验规则（必填、唯一、枚举）与问题行导出；

@@ -23,6 +23,93 @@ const TRANSFORMS = [
   ['lower', '转为小写'],
 ];
 
+// 日期格式：value 与后端 writer.DATE_FORMATS 的键一一对应，第二项是效果示例。
+const DATE_FORMAT_PRESETS = [
+  ['', '跟随全局设置'],
+  ['YYYY-MM-DD', '2026-10-21'],
+  ['YYYY/M/D', '2026/10/21'],
+  ['YYYY年M月D日', '2026年10月21日'],
+  ['YYYY-MM-DD HH:mm', '2026-10-21 14:30'],
+  ['YYYY-MM', '2026-10'],
+  ['M月D日', '10月21日'],
+  ['YYYYMMDD', '20261021'],
+  ['DD/MM/YYYY', '21/10/2026'],
+  ['MM/DD/YYYY', '10/21/2026'],
+];
+
+const pad2 = (n) => String(n).padStart(2, '0');
+
+/**
+ * 把 ISO 日期/时间字符串按 Excel 风格格式转成展示文本。
+ * 规则必须与后端 backend/formula.py 的 _format_date 保持一致，
+ * 否则预览和实际写出的 Excel 会对不上。
+ */
+function formatDateByPattern(value, pattern) {
+  if (!pattern || typeof value !== 'string') return value;
+  const m = value.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (!m) return value;
+  const year = m[1];
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const hh = m[4] || '00';
+  const mi = m[5] || '00';
+  const ss = m[6] || '00';
+  const hasTime = /H|S/.test(pattern);
+  const tokens = ['YYYY', 'YY', 'MM', 'DD', 'HH', 'mm', 'SS', 'M', 'D', 'H', 'S'];
+  let out = '';
+  let i = 0;
+  while (i < pattern.length) {
+    let hit = null;
+    for (const t of tokens) {
+      if (pattern.startsWith(t, i)) { hit = t; break; }
+    }
+    if (!hit) { out += pattern[i]; i += 1; continue; }
+    if (hit === 'YYYY') out += year;
+    else if (hit === 'YY') out += year.slice(2);
+    else if (hit === 'MM') out += pad2(month);
+    else if (hit === 'M') out += month;
+    else if (hit === 'DD') out += pad2(day);
+    else if (hit === 'D') out += day;
+    else if (hit === 'HH') out += hh;
+    else if (hit === 'H') out += String(Number(hh));
+    else if (hit === 'mm') out += hasTime ? mi : pad2(month);
+    else if (hit === 'SS') out += ss;
+    else if (hit === 'S') out += String(Number(ss));
+    i += hit.length;
+  }
+  return out;
+}
+
+const formulaOf = (mapping) => (
+  mapping && mapping.formula_on === true ? String(mapping.formula || '') : ''
+);
+
+/** 试算表格里的取值展示：空值统一显示为破折号。 */
+const sampleText = (value) => (
+  value === null || value === undefined || value === '' ? '—' : String(value)
+);
+
+// 函数速查只从后端取一次（/api/formula/help），避免前后端各维护一份函数清单
+let formulaHelpCache = null;
+
+async function loadFormulaHelp() {
+  if (!formulaHelpCache) {
+    formulaHelpCache = await api.formulaHelp();
+  }
+  return formulaHelpCache;
+}
+
+/** 在输入框光标处插入文本，并把光标移到插入内容之后。 */
+function insertAtCursor(input, text) {
+  const start = input.selectionStart ?? input.value.length;
+  const end = input.selectionEnd ?? input.value.length;
+  input.value = input.value.slice(0, start) + text + input.value.slice(end);
+  const caret = start + text.length;
+  input.focus();
+  input.setSelectionRange(caret, caret);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
 export default {
   nav: 'profiles',
   async render(view, ctx) {
@@ -206,6 +293,8 @@ export default {
       for (const col of includedColumns(config)) {
         const existing = config.mappings[col.key];
         if (existing && existing.mode === 'const') continue;
+        // 已经用公式算出来的列不参与自动匹配，否则会把公式覆盖掉
+        if (existing && existing.formula_on === true) continue;
         if (existing && existing.mode === 'table') {
           const headers = tableHeaders(existing.table_id);
           if (headers.length && Number(existing.column_index) >= 0 && Number(existing.column_index) < headers.length) continue;
@@ -615,17 +704,19 @@ export default {
       const entries = activeEntries();
       const mapped = cols.filter((c) => {
         const m = config.mappings[c.key];
-        return m && (m.mode === 'const' || m.mode === 'table');
+        return m && (m.mode === 'const' || m.mode === 'table' || m.formula_on === true);
       }).length;
+      const formulaCount = cols.filter((c) => config.mappings[c.key]?.formula_on === true).length;
       return `
         <section class="section-card" id="section-mapping">
           <div class="section-head">
             <span class="section-num">3</span>
             <div class="section-head-main">
               <h3>字段映射</h3>
-              <p>为每个目标列指定来源字段。可以按列名自动匹配，也可以逐列手选。</p>
+              <p>为每个目标列指定来源字段。可以按列名自动匹配，也可以逐列手选，或点 ƒx 用公式计算。</p>
             </div>
             <div class="section-head-actions">
+              ${formulaCount ? `<span class="chip chip-brand">${formulaCount} 列用公式</span>` : ''}
               <span class="chip ${mapped === cols.length && cols.length ? 'chip-brand' : 'chip-gold'}">${mapped} / ${cols.length} 已配置</span>
               <button class="btn btn-secondary btn-sm" type="button" data-auto-map>${icon('wand')}按列名匹配</button>
             </div>
@@ -635,21 +726,27 @@ export default {
               : `<div class="map-scroll">
                   <div class="map-table">
                     <div class="map-row head">
-                      <span>目标列</span><span>数据来源</span><span>来源字段</span><span>处理</span><span>缺省值</span><span></span>
+                      <span>目标列</span><span>数据来源</span><span>来源字段 / 公式</span><span>处理</span><span>缺省值</span><span></span>
                     </div>
                     ${cols.map((col) => renderMappingRow(col, entries)).join('')}
                   </div>
                 </div>`}
-          <div class="tiny faint mt-10">缺省值会在来源为空或没有匹配到行时写入；选择「固定值」可给整列写入同一个内容。</div>
+          <div class="tiny faint mt-10">缺省值会在来源为空或没有匹配到行时写入；选择「固定值」可给整列写入同一个内容。
+            字段右侧的 <b>ƒx</b> 可以用 Excel 公式算出整列；处理方式选「统一为日期」时可再指定显示格式。</div>
         </section>`;
     }
 
     function renderMappingRow(col, entries) {
       const mapping = config.mappings[col.key];
       const mode = mapping?.mode || 'blank';
-      const invalid = mode === 'table' && !tableHeaders(mapping.table_id).length;
+      const useFormula = mapping?.formula_on === true;
+      const expr = formulaOf(mapping);
+      const invalid = !useFormula && mode === 'table' && !tableHeaders(mapping.table_id).length;
+      const transform = mapping?.transform || 'direct';
+      const showDateFormat = !useFormula && mode === 'table' && transform === 'date';
+      const statusOff = !useFormula && mode === 'blank';
       return `
-        <div class="map-row ${mode === 'blank' || invalid ? 'needs-attention' : ''}" data-map-row="${attr(col.key)}">
+        <div class="map-row ${(statusOff || invalid) ? 'needs-attention' : ''}" data-map-row="${attr(col.key)}">
           <div class="map-target">
             <span class="name" title="${attr(col.name)}">${esc(col.name)}</span>
             <span class="type">${typeName(col.type)}</span>
@@ -657,24 +754,35 @@ export default {
           <select class="select select-sm" data-map-source="${attr(col.key)}">
             ${mappingSourceOptions(col, mapping)}
           </select>
-          <div>
-            ${mode === 'table'
-              ? `<select class="select select-sm" data-map-field="${attr(col.key)}">${fieldOptions(col, mapping)}</select>`
-              : mode === 'const'
-                ? `<input class="input input-sm" value="${attr(mapping?.value || '')}" data-map-const="${attr(col.key)}" placeholder="固定内容">`
-                : `<span class="tiny faint">该列输出为空</span>`}
+          <div class="map-field">
+            ${useFormula
+              ? `<button class="fx-chip" type="button" data-map-formula="${attr(col.key)}" title="点击编辑公式">
+                   <span class="fx-mark">ƒx</span>
+                   <span class="fx-expr">${esc(expr.trim() || '公式为空，点此填写')}</span>
+                 </button>`
+              : mode === 'table'
+                ? `<div class="field-with-fx">
+                     <select class="select select-sm" data-map-field="${attr(col.key)}">${fieldOptions(col, mapping)}</select>
+                     <button class="fx-btn" type="button" data-map-formula="${attr(col.key)}" title="用 Excel 公式计算这一列">ƒx</button>
+                   </div>`
+                : mode === 'const'
+                  ? `<input class="input input-sm" value="${attr(mapping?.value || '')}" data-map-const="${attr(col.key)}" placeholder="固定内容">`
+                  : `<span class="tiny faint">该列输出为空</span>`}
           </div>
-          <div>
-            <select class="select select-sm" data-map-transform="${attr(col.key)}" ${mode !== 'table' ? 'disabled' : ''}>
-              ${transformOptions(mapping?.transform)}
+          <div class="map-transform">
+            <select class="select select-sm" data-map-transform="${attr(col.key)}" ${mode !== 'table' || useFormula ? 'disabled' : ''}>
+              ${transformOptions(transform)}
             </select>
+            ${showDateFormat ? `<select class="select select-sm fmt-select" data-map-datefmt="${attr(col.key)}" title="日期显示格式">
+              ${DATE_FORMAT_PRESETS.map(([value, sample]) => `<option value="${attr(value)}" ${(mapping?.date_format || '') === value ? 'selected' : ''}>${esc(sample)}</option>`).join('')}
+            </select>` : ''}
           </div>
           <div>
             <input class="input input-sm" value="${attr(mapping?.fallback || '')}" data-map-fallback="${attr(col.key)}"
-              placeholder="${mode === 'table' ? '可留空' : '—'}" ${mode !== 'table' ? 'disabled' : ''}>
+              placeholder="${useFormula ? '公式结果' : mode === 'table' ? '可留空' : '—'}" ${mode !== 'table' || useFormula ? 'disabled' : ''}>
           </div>
-          <div class="map-status ${invalid ? 'warn' : mode === 'blank' ? 'off' : ''}" title="${invalid ? '来源已失效' : mode === 'blank' ? '尚未配置' : '已配置'}">
-            ${invalid ? icon('alert') : mode === 'blank' ? icon('info') : icon('check-circle')}
+          <div class="map-status ${invalid ? 'warn' : statusOff ? 'off' : ''}" title="${invalid ? '来源已失效' : statusOff ? '尚未配置' : useFormula ? '公式计算' : '已配置'}">
+            ${invalid ? icon('alert') : statusOff ? icon('info') : icon('check-circle')}
           </div>
         </div>`;
     }
@@ -1033,9 +1141,24 @@ export default {
         select.addEventListener('change', () => {
           const mapping = config.mappings[select.dataset.mapTransform];
           if (!mapping) return;
+          const wasDate = mapping.transform === 'date';
           mapping.transform = select.value;
-          markDirty(false);
+          // 进出「统一为日期」都要重绘：进要出现格式下拉，出要收掉
+          markDirty(wasDate || select.value === 'date');
         });
+      });
+      view.querySelectorAll('[data-map-datefmt]').forEach((select) => {
+        select.addEventListener('change', () => {
+          const mapping = config.mappings[select.dataset.mapDatefmt];
+          if (!mapping) return;
+          mapping.date_format = select.value;
+          scheduleSave();
+          const label = select.options[select.selectedIndex]?.text || select.value;
+          toast(select.value ? `日期显示为 ${label}` : '日期格式改回跟随全局设置', 'ok');
+        });
+      });
+      view.querySelectorAll('[data-map-formula]').forEach((btn) => {
+        btn.addEventListener('click', () => openFormulaDialog(btn.dataset.mapFormula));
       });
       view.querySelectorAll('[data-map-fallback]').forEach((input) => {
         input.addEventListener('input', () => {
@@ -1265,14 +1388,221 @@ export default {
       });
     }
 
+    // ---------- 字段公式 ----------
+    function openFormulaDialog(colKey) {
+      const col = config.target.columns.find((c) => c.key === colKey);
+      if (!col) return;
+      const tableIds = activeIds();
+      if (!tableIds.length) {
+        toast('先选择主表或要合并的数据表，公式才有字段可引用。', 'warn');
+        return;
+      }
+      const fields = [];
+      for (const tid of tableIds) {
+        for (const header of tableHeaders(tid)) {
+          if (header && !fields.includes(header)) fields.push(header);
+        }
+      }
+      // 试算用「有数据的表」：join 用主表，append 用第一张合并表
+      const tryTable = config.mode === 'join'
+        ? (config.primary_table || tableIds[0])
+        : (config.append_tables[0] || tableIds[0]);
+      const mapping = config.mappings[colKey] || {};
+      const isDateCol = (col.type || 'auto') === 'date';
+      const initialDateFmt = mapping.date_format || '';
+      let timer = null;
+      let lastValid = null;
+
+      const ref = openModal({
+        title: `用公式计算「${esc(col.name)}」`,
+        sub: '引用字段写成 [字段名]，公式以 = 开头（可省略）。改完会自动校验并试算前 5 行。',
+        size: 'modal-xl',
+        body: `
+          <div class="fx-dialog">
+            <div class="fx-input-wrap">
+              <span class="fx-prefix">ƒx</span>
+              <input class="input fx-input" data-fx-input spellcheck="false" autocomplete="off"
+                placeholder="例如 =[单价]*[数量] 或 =IF([数量]>0, [金额]/[数量], 0)"
+                value="${attr(formulaOf(mapping))}">
+            </div>
+            <div class="fx-status idle" data-fx-status><span class="faint">填写后自动校验并试算。</span></div>
+            <div class="fx-grid">
+              <div class="fx-pane">
+                <div class="fx-pane-title">可引用的字段 <span class="faint">点一下插入</span></div>
+                <div class="fx-chips">
+                  ${fields.length
+                    ? fields.map((f) => `<button class="fx-field" type="button" data-fx-field="${attr(f)}">${esc(f)}</button>`).join('')
+                    : '<span class="tiny faint">还没有可用字段</span>'}
+                </div>
+              </div>
+              <div class="fx-pane">
+                <div class="fx-pane-title">函数速查 <span class="faint">点一下插入</span></div>
+                <div class="fx-funcs" data-fx-funcs><span class="tiny faint">加载中…</span></div>
+              </div>
+            </div>
+            ${isDateCol ? `<div class="fx-date-row">
+              <span class="fx-date-label">日期显示格式</span>
+              <select class="select select-sm" data-fx-datefmt>
+                ${DATE_FORMAT_PRESETS.map(([value, sample]) => `<option value="${attr(value)}" ${initialDateFmt === value ? 'selected' : ''}>${esc(sample)}</option>`).join('')}
+              </select>
+              <span class="tiny faint">公式算出日期时，Excel 里按这个格式显示</span>
+            </div>` : ''}
+            <div class="fx-pane fx-preview-pane">
+              <div class="fx-pane-title">前 5 行试算 <span class="faint" data-fx-src></span></div>
+              <div data-fx-preview><span class="tiny faint">—</span></div>
+            </div>
+          </div>`,
+        footer: `
+          ${mapping.formula_on ? '<button class="btn btn-secondary" type="button" data-fx-off>关闭公式</button>' : ''}
+          <button class="btn btn-secondary" type="button" data-close>取消</button>
+          <button class="btn btn-primary" type="button" data-fx-apply>应用公式</button>`,
+      });
+
+      const input = ref.modal.querySelector('[data-fx-input]');
+      const statusBox = ref.modal.querySelector('[data-fx-status]');
+      const previewBox = ref.modal.querySelector('[data-fx-preview]');
+      const srcLabel = ref.modal.querySelector('[data-fx-src]');
+      const dateSelect = ref.modal.querySelector('[data-fx-datefmt]');
+
+      const setStatus = (kind, html) => {
+        statusBox.className = `fx-status ${kind}`;
+        statusBox.innerHTML = html;
+      };
+
+      function renderTry(res) {
+        srcLabel.textContent = res.total_rows ? `取自「${tableLabel(tryTable)}」共 ${res.total_rows} 行` : '';
+        if (!res.samples?.length) {
+          previewBox.innerHTML = '<span class="tiny faint">这张表没有数据行可试算。</span>';
+          return;
+        }
+        previewBox.innerHTML = `<table class="table compact fx-table">
+          <thead><tr><th style="width:52px">行</th><th>引用的字段值</th><th>计算结果</th></tr></thead>
+          <tbody>${res.samples.map((s) => `<tr>
+            <td class="faint">${s.row}</td>
+            <td class="fx-inputs">${res.refs.length
+              ? res.refs.map((r) => `<span class="fx-kv"><b>${esc(r)}</b>${esc(sampleText(s.inputs?.[r]))}</span>`).join('')
+              : '<span class="faint">—</span>'}</td>
+            <td>${s.error
+              ? `<span class="fx-err">${esc(s.error)}</span> <span class="tiny faint">${esc(s.message || '')}</span>`
+              : `<b>${esc(sampleText(s.result))}</b>`}</td>
+          </tr>`).join('')}</tbody>
+        </table>`;
+      }
+
+      async function checkAndTry() {
+        const value = input.value.trim();
+        lastValid = null;
+        if (!value) {
+          setStatus('idle', '<span class="faint">公式为空。填写后会自动校验并试算。</span>');
+          previewBox.innerHTML = '<span class="tiny faint">—</span>';
+          srcLabel.textContent = '';
+          return;
+        }
+        setStatus('busy', '<span class="spinner spinner-sm"></span><span>正在校验…</span>');
+        let check;
+        try {
+          check = await api.formulaCheck(value, tableIds);
+        } catch (err) {
+          setStatus('bad', `${icon('alert')}<span>${esc(err.message)}</span>`);
+          previewBox.innerHTML = '<span class="tiny faint">—</span>';
+          return;
+        }
+        if (!check.valid) {
+          setStatus('bad', `${icon('alert')}<span>${esc(check.error || '公式有问题')}</span>`);
+          previewBox.innerHTML = '<span class="tiny faint">—</span>';
+          return;
+        }
+        lastValid = value;
+        setStatus('good', `${icon('check-circle')}<span>语法正确，引用了 ${check.refs.length} 个字段${check.refs.length ? `：${esc(check.refs.join('、'))}` : ''}</span>`);
+        try {
+          renderTry(await api.formulaTry(value, tryTable, 5));
+        } catch (err) {
+          previewBox.innerHTML = `<span class="tiny faint">${esc(err.message)}</span>`;
+        }
+      }
+
+      input.addEventListener('input', () => {
+        clearTimeout(timer);
+        timer = setTimeout(checkAndTry, 350);
+      });
+
+      ref.modal.querySelectorAll('[data-fx-field]').forEach((btn) => {
+        btn.addEventListener('click', () => insertAtCursor(input, `[${btn.dataset.fxField}]`));
+      });
+      ref.modal.querySelector('[data-close]').addEventListener('click', ref.close);
+
+      ref.modal.querySelector('[data-fx-off]')?.addEventListener('click', () => {
+        config.mappings[colKey] = { ...(config.mappings[colKey] || {}), formula_on: false };
+        ref.close();
+        markDirty(true);
+        toast('已关闭公式，这一列改回普通映射。', 'ok');
+      });
+
+      ref.modal.querySelector('[data-fx-apply]').addEventListener('click', async () => {
+        // 先掐掉待执行的 debounce 校验：否则空公式的报错会被它的 idle 状态覆盖，
+        // 用户在界面上只会看到提示一闪而过。
+        clearTimeout(timer);
+        const value = input.value.trim();
+        if (!value) {
+          setStatus('bad', `${icon('alert')}<span>公式不能为空。不想用公式的话，点「关闭公式」或「取消」。</span>`);
+          input.focus();
+          return;
+        }
+        if (lastValid !== value) await checkAndTry();
+        if (lastValid !== value) {
+          toast('公式还没通过校验，请先按提示修正。', 'warn');
+          return;
+        }
+        const next = {
+          ...(config.mappings[colKey] || { mode: 'blank' }),
+          formula: value,
+          formula_on: true,
+        };
+        if (dateSelect) next.date_format = dateSelect.value || '';
+        config.mappings[colKey] = next;
+        ref.close();
+        markDirty(true);
+        toast('公式已应用，生成时会按公式计算这一列。', 'ok');
+      });
+
+      loadFormulaHelp().then((help) => {
+        const box = ref.modal.querySelector('[data-fx-funcs]');
+        if (!box) return;
+        box.innerHTML = help.functions.map((group) => `
+          <div class="fx-func-group">
+            <div class="fx-func-group-title">${esc(group.group)}</div>
+            <div class="fx-func-list">
+              ${group.items.map((it) => `<button class="fx-func" type="button" data-fx-fn="${attr(it.name)}"
+                title="${attr(`${it.sig} — ${it.desc}`)}">${esc(it.name)}</button>`).join('')}
+            </div>
+          </div>`).join('');
+        box.querySelectorAll('[data-fx-fn]').forEach((btn) => {
+          btn.addEventListener('click', () => insertAtCursor(input, `${btn.dataset.fxFn}(`));
+        });
+      }).catch(() => {
+        const box = ref.modal.querySelector('[data-fx-funcs]');
+        if (box) box.innerHTML = '<span class="tiny faint">函数清单没加载出来，直接手写公式也能用。</span>';
+      });
+
+      if (input.value.trim()) checkAndTry();
+      setTimeout(() => {
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }, 60);
+    }
+
     // ---------- 预览与运行 ----------
     function previewTable(headers, rows, max = 50) {
       if (!headers.length) return `<div class="empty small"><div class="empty-icon">${icon('table')}</div><h3>没有可预览的列</h3></div>`;
+      // 预览里就按配置的日期格式显示，避免「预览是 2026-10-21、Excel 里是 2026年10月21日」
+      const cols = includedColumns(config);
+      const formats = cols.map((c) => config.mappings[c.key]?.date_format || '');
       return `<div class="preview-scroll">
         <table class="table compact">
           <thead><tr>${headers.map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead>
           <tbody>${rows.slice(0, max).map((row) => `<tr>${headers.map((_, i) => {
-            const value = row[i];
+            const raw = row[i];
+            const value = formats[i] ? formatDateByPattern(raw, formats[i]) : raw;
             return `<td><div class="preview-cell" title="${attr(value ?? '')}">${value === null || value === undefined || value === '' ? '<span class="faint">—</span>' : esc(value)}</div></td>`;
           }).join('')}</tr>`).join('')}</tbody>
         </table>

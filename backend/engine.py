@@ -1,10 +1,12 @@
 """汇总引擎：表解析、关联 / 纵向合并、字段映射与统计。"""
 from __future__ import annotations
 
+import datetime as dt
 import time
 from typing import Any
 
 from . import db
+from .formula import Formula, FormulaError, FormulaSyntaxError, compile_formula
 from .readers import read_table_data_cached
 from .templates import template_by_id
 from .utils import (
@@ -106,6 +108,39 @@ def _as_index(value: Any) -> int | None:
         return None
 
 
+def _formula_on(mapping: dict) -> bool:
+    """该列是否启用了公式。formula_on 为真才算，空公式交由 validate 报错。"""
+    return mapping.get("formula_on") is True
+
+
+def _formula_value(formula: Formula, fields: dict, col_name: str,
+                   ctx: dict, row_no: int) -> Any:
+    """求值单个公式；失败时返回 Excel 错误值并记账，绝不静默丢数。"""
+    try:
+        value = formula.evaluate(fields)
+    except FormulaError as exc:
+        book = ctx.setdefault("formula_errors", {})
+        info = book.setdefault(col_name, {"count": 0, "codes": {}, "first": "", "first_row": row_no})
+        info["count"] += 1
+        info["codes"][exc.code] = info["codes"].get(exc.code, 0) + 1
+        if not info["first"]:
+            info["first"] = f"第 {row_no} 行 {exc.message}"
+        return exc.code
+    except RecursionError:
+        book = ctx.setdefault("formula_errors", {})
+        info = book.setdefault(col_name, {"count": 0, "codes": {}, "first": "", "first_row": row_no})
+        info["count"] += 1
+        info["codes"]["#NUM!"] = info["codes"].get("#NUM!", 0) + 1
+        if not info["first"]:
+            info["first"] = f"第 {row_no} 行 公式嵌套过深"
+        return "#NUM!"
+    # 日期结果转 ISO 文本：预览接口要 JSON 序列化；写入时列类型为日期
+    # 会被 writer 重新解析成日期对象并套用格式，不影响 Excel 里的日期语义。
+    if isinstance(value, (dt.date, dt.datetime)):
+        return display_value(value)
+    return value
+
+
 def validate_config(config: dict, registry: Registry | None = None) -> dict:
     registry = registry or Registry()
     errors: list[str] = []
@@ -181,10 +216,48 @@ def validate_config(config: dict, registry: Registry | None = None) -> dict:
                 active_tables.append(tid)
 
     mappings = config.get("mappings") or {}
+    # 公式能引用的字段 = 所有参与表表头的并集。重名字段按「先出现者优先」
+    # 解析（主表 → 关联表/合并表按选择顺序），与求值时的 fields 构造保持一致。
+    field_owner: dict[str, list[str]] = {}
+    for tid in active_tables:
+        for header in registry.headers(tid):
+            name = str(header).strip()
+            if name:
+                field_owner.setdefault(name, []).append(tid)
+
     unmapped = 0
     for col in cols:
         mapping = mappings.get(col.get("key")) or {}
         m_mode = mapping.get("mode") or "blank"
+        if _formula_on(mapping):
+            text = str(mapping.get("formula") or "")
+            if not text.strip():
+                errors.append(f"列「{col['name']}」启用了公式但内容为空，请填写公式或关闭公式。")
+            else:
+                try:
+                    compiled = compile_formula(text)
+                except FormulaSyntaxError as exc:
+                    errors.append(
+                        f"列「{col['name']}」公式语法错误：{exc.message}（第 {exc.pos} 个字符附近）"
+                    )
+                else:
+                    missing = [r for r in compiled.refs if r not in field_owner]
+                    if missing:
+                        sample = "、".join(f"[{m}]" for m in missing[:3])
+                        usable = "、".join(list(field_owner)[:8]) or "（暂无可用字段）"
+                        errors.append(
+                            f"列「{col['name']}」公式引用了不存在的字段 {sample}。"
+                            f"可引用：{usable}"
+                        )
+                    elif mode == "append":
+                        partial = [r for r in compiled.refs
+                                   if len(field_owner[r]) < len(active_tables)]
+                        if partial:
+                            warnings.append(
+                                f"列「{col['name']}」公式引用的「{'、'.join(partial[:3])}」"
+                                "只在部分数据表中存在，缺失的行会写入 #REF!。"
+                            )
+            continue
         if m_mode == "table":
             tid = mapping.get("table_id")
             if not registry.has(tid):
@@ -273,6 +346,23 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
     cols = _included_columns(config)
     mappings = config.get("mappings") or {}
     options = config.get("options") or {}
+
+    # 公式在进入行循环前编译一次，几万行里只做求值不再解析
+    formulas: dict[str, Formula] = {}
+    for col in cols:
+        mapping = mappings.get(col.get("key")) or {}
+        if not _formula_on(mapping):
+            continue
+        text = str(mapping.get("formula") or "")
+        if not text.strip():
+            raise UserError(f"列「{col['name']}」启用了公式但内容为空，请填写公式或关闭公式。")
+        try:
+            formulas[col["key"]] = compile_formula(text)
+        except FormulaSyntaxError as exc:
+            raise UserError(
+                f"列「{col['name']}」公式语法错误：{exc.message}（第 {exc.pos} 个字符附近）"
+            ) from exc
+    need_formula = bool(formulas)
     trim_text = bool(db.get_settings().get("trim_text", True))
     warnings: list[str] = list(check["warnings"])
     unmapped_count = check.get("unmapped", 0)
@@ -393,16 +483,36 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
     if mode == "join":
         # 每行动态计算 lookup 行，避免构建巨大笛卡尔结构
         pkeys = [int(k) for k in (config.get("primary_keys") or [])]
+        pheaders = primary_data["headers"]
         for row in primary_data["rows"]:
             key = _join_key(row, pkeys)
             matched_rows = {}
             if all(key):
                 for ld in lookup_data:
                     matched_rows[ld["table_id"]] = ld["index"].get(key)
+            fields = None
+            if need_formula:
+                # 主表字段先占位，关联表用 setdefault 补；
+                # 没匹配到关联行时也要把字段名放进去（值为 None），
+                # 否则公式引用它会报 #REF!，而 Excel 里缺失单元格是空值。
+                fields = {}
+                for i, h in enumerate(pheaders):
+                    fields.setdefault(h, row[i] if i < len(row) else None)
+                for ld in lookup_data:
+                    lk_row = matched_rows.get(ld["table_id"])
+                    for i, h in enumerate(ld["headers"]):
+                        fields.setdefault(
+                            h, lk_row[i] if lk_row is not None and i < len(lk_row) else None
+                        )
+            row_no = len(output_rows) + 1
             out = []
             for col in cols:
-                mapping = mappings.get(col.get("key")) or {"mode": "blank"}
-                value = resolve_for_join(mapping, row, matched_rows)
+                compiled = formulas.get(col.get("key"))
+                if compiled is not None:
+                    value = _formula_value(compiled, fields, col["name"], ctx, row_no)
+                else:
+                    mapping = mappings.get(col.get("key")) or {"mode": "blank"}
+                    value = resolve_for_join(mapping, row, matched_rows)
                 if trim_text and isinstance(value, str):
                     value = value.strip()
                 out.append(value)
@@ -414,14 +524,43 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
         totals["input"] = len(primary_data["rows"])
     else:
         auto_by_name = bool(config.get("auto_by_name", True))
+        # 纵向合并时各表列名可能不同，先把并集准备好，
+        # 让公式引用另一张表独有的字段时得到空值而不是 #REF!
+        all_fields: list[str] = []
+        if need_formula:
+            seen_fields: set[str] = set()
+            for ld in lookup_data:
+                for h in ld["headers"]:
+                    if h not in seen_fields:
+                        seen_fields.add(h)
+                        all_fields.append(h)
         for ld in lookup_data:
             headers = ld["headers"]
             # 预先建好「列名 → 列下标」映射：以前是 rows × cols 次 headers.index()，
             # 每次线性扫一遍表头；5 万行 × 20 列就是上百万次查找。
             name_pos = {h: i for i, h in enumerate(headers)}
             for row in ld["rows"]:
+                fields = None
+                if need_formula:
+                    fields = {h: (row[i] if i < len(row) else None) for i, h in enumerate(headers)}
+                    for h in all_fields:
+                        fields.setdefault(h, None)
+                row_no = len(output_rows) + 1
                 out = []
                 for col in cols:
+                    compiled = formulas.get(col.get("key"))
+                    if compiled is not None:
+                        value = _formula_value(compiled, fields, col["name"], ctx, row_no)
+                        if value is None:
+                            value = ""
+                        if trim_text and isinstance(value, str):
+                            value = value.strip()
+                        out.append(value)
+                        if value == "":
+                            empty += 1
+                        else:
+                            filled += 1
+                        continue
                     mapping = mappings.get(col.get("key")) or {"mode": "blank"}
                     value = None
                     if mapping.get("mode") == "const":
@@ -456,6 +595,13 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
         warnings.append(
             f"{ctx['ambiguous_dates']} 个日期形如 03/04/2026，无法判断日/月顺序，已按原文保留。"
             "如需统一，请先在源表中改成 2026-03-04 这种格式。"
+        )
+
+    for col_name, info in (ctx.get("formula_errors") or {}).items():
+        codes = "、".join(f"{code}×{count}" for code, count in info["codes"].items())
+        warnings.append(
+            f"列「{col_name}」有 {info['count']} 个单元格公式计算失败（{codes}），"
+            f"首个：{info['first']}。结果里已写入 Excel 错误值，可用 IFERROR 兜底。"
         )
 
     headers = [str(c["name"]).strip() for c in cols]
