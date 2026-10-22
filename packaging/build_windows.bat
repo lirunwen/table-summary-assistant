@@ -97,6 +97,9 @@ xcopy "dist\HuiYi\*" "%STAGE%\" /E /I /H /Y >nul
 copy /Y "packaging\launcher.bat" "%STAGE%\启动.bat" >nul
 rem 再放一份 ASCII 名字的启动器，防止解压工具把中文名解成乱码后找不到入口
 copy /Y "packaging\launcher.bat" "%STAGE%\start.bat" >nul
+rem 安装器：建桌面与开始菜单快捷方式；同样留一份 ASCII 名字
+copy /Y "packaging\install.bat" "%STAGE%\安装.bat" >nul
+copy /Y "packaging\install.bat" "%STAGE%\install.bat" >nul
 copy /Y "packaging\使用说明-打包版.txt" "%STAGE%\使用说明.txt" >nul
 if exist "LICENSE" copy /Y "LICENSE" "%STAGE%\LICENSE.txt" >nul
 if exist "samples" xcopy "samples" "%STAGE%\samples\" /E /I /Y >nul

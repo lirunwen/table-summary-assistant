@@ -122,7 +122,7 @@ def banner(url: str):
     print(f"  数据目录   {DATA_DIR}")
     print("  运行模式   仅本机 · 离线可用 · 数据不上传")
     print(f"  {line}")
-    print("  关闭此窗口即停止服务。\n")
+    print("  退出方式   页面侧栏「退出应用」，或直接关闭此窗口\n")
 
 
 def main():
@@ -135,9 +135,24 @@ def main():
     parser.add_argument("--host", default="127.0.0.1", help="监听地址，默认仅本机")
     parser.add_argument("--no-browser", action="store_true", help="启动后不自动打开浏览器")
     parser.add_argument("--debug", action="store_true", help="开发模式（Flask 自动重载）")
+    parser.add_argument("--create-shortcut", action="store_true",
+                        help="只在桌面/开始菜单创建快捷方式后退出（供「安装.bat」调用）")
     args = parser.parse_args()
-
     setup_logging()
+
+    # 建快捷方式是个一次性动作，不用起服务，也不该碰数据库。
+    # 「安装.bat」就是 `HuiYi.exe --create-shortcut` + 可选启动，
+    # 这样 .bat 里不需要写任何 PowerShell 或中文路径拼接。
+    if args.create_shortcut:
+        from backend.appcontrol import create_shortcuts
+        result = create_shortcuts()
+        print()
+        print(f"  {result.get('message') or '完成'}")
+        for path in result.get("created") or []:
+            print(f"    {path}")
+        print()
+        sys.exit(0 if result.get("ok") else 1)
+
     db.init_db()
 
     host = args.host

@@ -78,7 +78,7 @@ jobs:
         run: python -c "import flask, openpyxl, xlrd, waitress, extract_msg; print('deps ok')"
 
       - name: 回归测试
-        run: python -m pytest tests/test_regressions.py -q
+        run: python -m pytest tests -q
 
       - name: 端到端冒烟测试
         env:
@@ -108,6 +108,9 @@ jobs:
           # 再放一份 ASCII 名字的启动器：某些解压工具（老版 WinRAR / 7-Zip 配置了
           # 非 UTF-8 文件名）会把中文名解成乱码，留着这个总能双击打开。
           Copy-Item "packaging/launcher.bat" "$stage/start.bat" -Force
+          # 安装器：建桌面与开始菜单快捷方式。同样留一份 ASCII 名字。
+          Copy-Item "packaging/install.bat" "$stage/安装.bat" -Force
+          Copy-Item "packaging/install.bat" "$stage/install.bat" -Force
           Copy-Item "packaging/使用说明-打包版.txt" "$stage/使用说明.txt" -Force
           if (Test-Path "LICENSE") { Copy-Item "LICENSE" "$stage/LICENSE.txt" -Force }
           if (Test-Path "samples") { Copy-Item "samples" "$stage/samples" -Recurse -Force }
@@ -115,7 +118,22 @@ jobs:
           # zip 名必须全 ASCII：softprops/action-gh-release 会把文件名里的非 ASCII
           # 字符直接删掉，中文前缀会导致资产变成 "-v0.2.0-windows-x64.zip"。
           $zip = "dist/TableSummaryAssistant-v$ver-windows-x64.zip"
-          Compress-Archive -Path $stage -DestinationPath $zip -Force
+          # 优先用系统自带 bsdtar（Win10 1803+）：Compress-Archive 用 .NET 写中文文件名
+          # 时不带 UTF-8 标志位（bit 11），换一台非中文 Windows 或用第三方解压工具
+          # 打开就是乱码目录名——安装体验直接卡在第一步。
+          $made = $false
+          try {
+            tar -a -c -f $zip -C "dist/stage" "表格汇总助手"
+            if (Test-Path $zip) {
+              $entries = (tar -tf $zip | Measure-Object).Count
+              if ($entries -gt 500) { $made = $true }
+            }
+          } catch { $made = $false }
+          if (-not $made) {
+            Write-Host "bsdtar 打包失败，回退到 Compress-Archive"
+            if (Test-Path $zip) { Remove-Item $zip -Force }
+            Compress-Archive -Path $stage -DestinationPath $zip -Force
+          }
           "ZIP_NAME=$(Split-Path $zip -Leaf)" >> $env:GITHUB_ENV
 
           # 体积体检：extract-msg 会拖进 oletools / cryptography 等一串依赖
@@ -167,7 +185,18 @@ jobs:
             certutil -hashfile TableSummaryAssistant-v*-windows-x64.zip SHA256
             ```
 
-            解压后双击「启动.bat」（或 `start.bat`）即可，**目标电脑不需要安装 Python，也不需要管理员权限**。
+            ## 安装（三步）
+
+            1. 解压到任意目录（例如 `D:\表格汇总助手`）
+            2. 双击 **「安装.bat」** → 桌面与开始菜单各生成一个「表格汇总助手」图标
+            3. 以后双击桌面图标即可打开
+
+            也可以跳过第 2 步，直接双击「启动.bat」使用，只是桌面不会有图标。
+
+            ## 退出
+
+            页面左侧栏底部有 **「退出应用」**，点它就会停止服务并关闭命令行窗口，
+            不需要自己去任务栏里找那个黑窗口。
 
             ## 适用环境
 

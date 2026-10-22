@@ -142,6 +142,14 @@ export const api = {
   openDataFolder() {
     return request('/api/open-data-folder', { method: 'POST' });
   },
+
+  createShortcut() {
+    return request('/api/app/shortcut', { method: 'POST' });
+  },
+
+  exitApp() {
+    return request('/api/app/exit', { method: 'POST' });
+  },
 };
 
 export { ApiError };

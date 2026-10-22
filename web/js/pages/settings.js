@@ -2,7 +2,8 @@
 import { api } from '../api.js';
 import { loadBootstrap, state } from '../store.js';
 import {
-  confirmDialog, esc, fmtDate, fmtNumber, icon, pageHead, toast, withButtonLoading,
+  confirmDialog, esc, fmtDate, fmtNumber, icon, pageHead, requestExit, toast,
+  withButtonLoading,
 } from '../ui.js';
 
 export default {
@@ -99,6 +100,33 @@ export default {
           </section>
 
           <section class="card">
+            <div class="card-head"><div><h2 class="section-title">快捷方式与退出</h2><p class="section-sub">下次打开省一步，退出也不必去找黑窗口</p></div></div>
+            <div class="card-body" style="padding-top:6px">
+              <div class="setting-row">
+                <div class="setting-main">
+                  <strong>桌面快捷方式</strong>
+                  <p>${app.can_shortcut
+                    ? '在桌面与开始菜单各创建一个「表格汇总助手」图标，指向当前的 HuiYi.exe。程序换了目录就再点一次，图标会自动更新。'
+                    : '只有 Windows 打包版能创建 .lnk 快捷方式。当前系统请用启动脚本打开；功能不受影响。'}</p>
+                </div>
+                <div class="setting-control">
+                  <button class="btn btn-secondary" type="button" data-make-shortcut ${app.can_shortcut ? '' : 'disabled'}>${icon('desktop')}创建快捷方式</button>
+                </div>
+              </div>
+              <div class="setting-row">
+                <div class="setting-main">
+                  <strong>退出应用</strong>
+                  <p>停止本地服务并关闭启动窗口。效果和手动关掉黑窗口一样，但不用先去任务栏找它。</p>
+                </div>
+                <div class="setting-control">
+                  <button class="btn btn-secondary" type="button" data-exit-app>${icon('power')}退出应用</button>
+                </div>
+              </div>
+              <div class="rail-tip mt-14">${icon('info')}<span>退出只会停掉服务，<b>不会删除 data 文件夹</b>。下次双击快捷方式即可继续，历史方案与结果都在。</span></div>
+            </div>
+          </section>
+
+          <section class="card">
             <div class="card-head"><div><h2 class="section-title">关于表格汇总助手</h2><p class="section-sub">为办公室内网准备的本地工具</p></div></div>
             <div class="card-body">
               <p class="small muted" style="line-height:1.75">表格汇总助手把 Excel、CSV、Outlook 邮件与附件的汇总工作收在一个工作台里。前端样式、图标与脚本全部随程序分发，不加载任何公网字体、CDN 或统计代码，断网也能直接使用。</p>
@@ -142,6 +170,22 @@ export default {
       } catch (err) {
         toast(err.message, 'error');
       }
+    });
+
+    view.querySelector('[data-make-shortcut]')?.addEventListener('click', async (event) => {
+      const restore = withButtonLoading(event.currentTarget, '创建中…');
+      try {
+        const res = await api.createShortcut();
+        toast(res.message || '快捷方式已创建。', 'ok', 6000);
+      } catch (err) {
+        toast(err.message, 'error', 6000);
+      } finally {
+        restore();
+      }
+    });
+
+    view.querySelector('[data-exit-app]')?.addEventListener('click', () => {
+      requestExit();
     });
 
     view.querySelector('[data-cleanup]')?.addEventListener('click', async () => {

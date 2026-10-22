@@ -218,6 +218,19 @@ ul, ol { margin: 0; padding: 0; list-style: none; }
   animation: pulse 2.4s infinite;
 }
 .nav-item-sub { height: 36px; font-size: 13px; }
+/* 「退出应用」是 <button>，要把 <a> 那套默认样式抹平，否则字体、宽度、内边距全不一样 */
+.nav-item-btn {
+  width: 100%;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  color: var(--ink-soft);
+}
+.nav-item-btn:hover { color: var(--red); }
+.nav-item-btn:hover .icon { color: var(--red); }
 .sidebar-version {
   padding: 2px 12px 0;
   font-size: 10.5px;
@@ -2081,6 +2094,47 @@ h2.section-title {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #cfd9d4; border: 3px solid transparent; background-clip: padding-box; border-radius: 999px; }
 ::-webkit-scrollbar-thumb:hover { background: #b8c7c0; border: 3px solid transparent; background-clip: padding-box; }
+
+/* 退出落地页：服务已经停了，这一屏不能再依赖任何后端数据 */
+body.exited {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  margin: 0;
+  background: var(--bg-deep);
+}
+.exit-screen { width: 100%; max-width: 560px; padding: 28px; }
+.exit-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xl);
+  padding: 38px 34px 30px;
+  box-shadow: var(--shadow-md);
+  text-align: center;
+}
+.exit-mark {
+  width: 54px;
+  height: 54px;
+  margin: 0 auto 18px;
+  border-radius: 50%;
+  background: var(--brand-soft);
+  color: var(--brand);
+  display: grid;
+  place-items: center;
+}
+.exit-mark .icon { width: 26px; height: 26px; stroke-width: 2.2; }
+.exit-card h1 { font-size: 20px; margin: 0 0 10px; letter-spacing: -.01em; }
+.exit-card > p { margin: 0 0 22px; color: var(--muted); font-size: 13.5px; line-height: 1.85; }
+.exit-tips {
+  text-align: left;
+  display: grid;
+  gap: 12px;
+  border-top: 1px dashed var(--line);
+  padding-top: 20px;
+}
+.exit-tips > div { display: grid; grid-template-columns: 76px 1fr; gap: 12px; font-size: 12.5px; }
+.exit-tips strong { color: var(--ink-soft); font-weight: 600; }
+.exit-tips span { color: var(--muted); line-height: 1.75; }
 
 /* 打印 */
 @media print {

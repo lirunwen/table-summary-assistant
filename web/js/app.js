@@ -1,6 +1,6 @@
 /** 应用入口：路由、全局壳层、初始化。 */
 import { loadBootstrap, state } from './store.js';
-import { esc, icon, openModal, toast } from './ui.js';
+import { esc, icon, openModal, requestExit, toast } from './ui.js';
 import dashboardPage from './pages/dashboard.js';
 import sourcesPage from './pages/sources.js';
 import profilesPage from './pages/profiles.js';
@@ -183,6 +183,10 @@ function bindShell() {
       footer: `<button class="btn btn-primary" type="button" data-close>知道了</button>`,
     });
     help.modal.querySelector('[data-close]')?.addEventListener('click', help.close);
+  });
+
+  document.getElementById('exit-btn')?.addEventListener('click', () => {
+    requestExit();
   });
 
   window.addEventListener('hashchange', route);

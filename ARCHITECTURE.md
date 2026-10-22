@@ -69,6 +69,7 @@ huiyi/
 │  ├─ ingest.py           落盘、类型分派、邮件附件递归登记、删除
 │  ├─ templates.py        目标模板登记、工作表/表头解析
 │  ├─ formula.py          Excel 风格公式：词法、语法、白名单函数、逐行求值
+│  ├─ appcontrol.py       桌面快捷方式（PowerShell -EncodedCommand）与进程退出
 │  ├─ engine.py           配置校验、join/append、映射、统计
 │  ├─ writer.py           模板填充或新建工作簿、样式与公式保护
 │  ├─ diff.py             主键对比、差异明细、Excel 报告
@@ -381,6 +382,8 @@ Excel 里缺失的单元格是空的，不是错误。`append` 路径先算所�
 | GET | `/api/formula/help` | 函数速查（39 个，分四组）、日期格式键、引用语法与说明 |
 | POST | `/api/formula/check` | 只校验语法与字段引用，不需要完整方案；恒返回 200 |
 | POST | `/api/formula/try` | 取指定表前 N 行（默认 5）真算一遍，返回 `samples[].{row,result,error,message,inputs}` |
+| POST | `/api/app/shortcut` | 在桌面 / 开始菜单创建快捷方式；非 Windows 返回 400 与说明 |
+| POST | `/api/app/exit` | 停止服务并结束进程（仅监听回环地址时可用） |
 
 统一响应：`{ "ok": true, ... }` 或 `{ "ok": false, "error": "可直接展示的中文错误" }`。
 
@@ -423,8 +426,47 @@ data/
 1. 在可联网的 Windows 电脑安装 Python 3.11/3.12；
 2. 运行 `packaging\build_windows.bat`；
 3. 得到 `dist\HuiYi\`，内含 `HuiYi.exe`、`_internal/`、启动脚本与说明；
-4. 把整个文件夹复制到目标电脑，双击「启动表格汇总助手.bat」；
+4. 把整个文件夹复制到目标电脑，双击「安装.bat」建桌面图标（或直接双击「启动.bat」）；
 5. 首次启动自动创建 `data/`，无需管理员权限、无需安装。
+
+### 快捷方式是怎么建的（`backend/appcontrol.py`）
+
+`安装.bat` 本身不做任何路径拼接，只是 `HuiYi.exe --create-shortcut` 的一层壳。
+真正的逻辑在 Python 里，理由有三个：
+
+- **编码**：cmd 用 OEM 代码页，把中文路径传给 PowerShell 会变成乱码。改成
+  `powershell -EncodedCommand <UTF-16LE base64>`，命令原文一个字都不会被控制台改写。
+- **一致性**：页面上的「创建快捷方式」按钮和 `安装.bat` 调同一个函数，前缀、
+  图标、工作目录不可能各自漂移。
+- **可测**：脚本拼装是纯函数（`build_shortcut_script`），在非 Windows 上也能做断言。
+
+细节：
+
+| 项 | 取值 | 为什么 |
+| --- | --- | --- |
+| 目标 | `sys.executable`（打包后即 `HuiYi.exe`） | 指向 exe 而不是 `.bat`，双击不会先闪一个 cmd 窗口 |
+| 参数 | 空 | 不写死 `--port`，让 `HUIYI_PORT` 环境变量与自动避让逻辑继续生效 |
+| 工作目录 | exe 所在目录 | `DATA_DIR` 相对程序目录解析，工作目录错位会让数据落到别处 |
+| 图标 | `<exe>,0` | 用 exe 自带图标，不做额外资源 |
+| 位置 | `[Environment]::GetFolderPath('Desktop')` + `StartMenu\Programs` | 兼容 OneDrive / 域环境的桌面重定向 |
+| 窗口样式 | 1（常规） | 不隐藏控制台：启动失败时报错行是唯一线索 |
+
+一次运行写两个 `.lnk`，任何一个失败都不影响另一个；脚本把结果写成 UTF-8 JSON
+（`Set-Content -Encoding UTF8`，Python 侧用 `utf-8-sig` 读），Python 再统一成人话提示。
+
+### 退出：为什么必须是 `os._exit`
+
+页面「退出应用」→ `POST /api/app/exit` → `schedule_exit()` 起一个 daemon 线程，
+0.45 秒后 `os._exit(0)`。
+
+- **不能用 `sys.exit()`**：它只结束调用它的那个线程，waitress 主循环还在，
+  端口继续监听，用户会看到"点了退出但服务还活着"。
+- **为什么要延迟**：得让这次 HTTP 响应先写完，否则前端拿到的是
+  `net::ERR_CONNECTION_RESET`，会误报成"退出失败"。
+- **界面先切换**：`showExited()` 在收到响应后立刻把页面换成「已退出」落地页，
+  之后不再发任何请求——不然会连着一串"无法连接本地服务"的报错弹窗。
+- **权限边界**：只有监听回环地址时才允许。`--host 0.0.0.0` 共享给同事的场景下，
+  任何人都能 POST 一下把服务关掉，这是不能接受的，所以直接 400 拒绝。
 
 ### 备选：源码 + 离线 wheelhouse
 
@@ -456,6 +498,11 @@ data/
   即使漏了一处 `esc()`，注入的脚本也执行不了。内联兜底脚本因此移到了
   `web/js/boot-guard.js`；
 - 不接入任何外部服务，代码中无遥测、无 CDN；
+- **退出接口只对本机开放**：`/api/app/exit` 在 `--host 0.0.0.0` 时直接 400。
+  共享给同事的场景下，一个匿名 POST 就能关停别人正在跑的服务，这是拒绝服务；
+  同理 `/api/app/shortcut` 只写用户自己的桌面，这两件事都必须有边界。
+- 快捷方式脚本通过 `-EncodedCommand` 传入，不经过 cmd 的代码页转换；
+  脚本里所有路径走 PowerShell 单引号字面量并转义单引号，不存在拼接注入。
 - 当前不做登录鉴权（单机信任模型）。若未来需要局域网共享，应增加访问令牌与 HTTPS/反向代理。
 
 ## 13.1 容量与资源上限
@@ -498,14 +545,20 @@ data/
   惰性求值）、Excel 错误值 4 例、语法错误 7 例（含报错位置）、`engine` 集成 6 例
   （空公式、坏引用、失败记账、日期结果、append 缺字段）、API 3 例、
   `writer` 日期格式 5+1 例（含中文格式代码与"跟随全局"）。
+- `tests/test_appcontrol.py`：10 条，覆盖快捷方式脚本拼装（中文路径、单引号转义、
+  `.format` 花括号是否写错）、PowerShell 输出归一化（单元素数组被拍平成标量）、
+  非 Windows 降级提示、退出钩子、以及「监听 0.0.0.0 时拒绝远程退出」。
 - `tests/smoke.py`：Flask test client 端到端覆盖上传、模板、关联汇总、预览、表头调整、运行、下载、两次结果对比、结果对源表、纵向自动匹配、`.xls`、真实 `.msg`、公式注入、模板追加。
 - `tests/ui/check-formula-mapping.mjs`：23 项浏览器断言，覆盖公式按钮、弹窗、
   实时校验状态条、试算表、日期格式下拉与预览列格式化。
 - `tests/ui/check-template-entry.mjs`：6 项，守住「模板入口在三张卡片第一层」这个回归。
+- `tests/ui/check-app-control.mjs`：12 项，覆盖侧栏退出按钮、设置页两个入口、
+  取消不退出、确认后落地页出现、以及**端口真的不再响应**（脚本会关掉被测服务，
+  所以必须跑在独立数据目录上，且放在最后）。
 - `tests/ui_shot.py`：开发期用 Chrome DevTools Protocol 截图与检查浏览器异常。
 - `samples/make_samples.py`：生成可复现的示例文件。
 
-当前基线：`pytest tests -q` → **116 passed**；两个 UI 巡检脚本 29/29 通过。
+当前基线：`pytest tests -q` → **126 passed**；三个 UI 巡检脚本 41/41 通过。
 
 ## 14.1 发布流水线
 

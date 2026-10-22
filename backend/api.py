@@ -29,6 +29,7 @@ from .config import (
 )
 from .diff import compare, export_compare
 from .engine import Registry, build, validate_config
+from .appcontrol import create_shortcuts, launch_target, schedule_exit, supports_shortcut
 from .formula import FUNCTION_CATALOG, FormulaError, FormulaSyntaxError, compile_formula
 from .ingest import delete_source, ingest_upload
 from .templates import delete_template, ingest_template, inspect_sheet, template_by_id
@@ -295,6 +296,11 @@ def create_app(port: int | None = None, host: str = "127.0.0.1") -> Flask:
                 "host": host,
                 "exposed": host not in ("127.0.0.1", "localhost"),
                 "offline": True,
+                # 退出按钮与快捷方式按钮要靠这两个字段决定显示什么：
+                # 源码跑到一半的 mac 上点「创建桌面快捷方式」应该是说明而不是报错。
+                "frozen": bool(getattr(sys, "frozen", False)),
+                "can_shortcut": supports_shortcut(),
+                "exe_path": launch_target()[0],
             },
             "settings": settings,
             "sources": sources,
@@ -801,6 +807,34 @@ def create_app(port: int | None = None, host: str = "127.0.0.1") -> Flask:
         except Exception as exc:
             raise UserError(f"无法打开文件夹：{exc}")
         return {"path": str(DATA_DIR)}
+
+    @app.post("/api/app/shortcut")
+    @api_route
+    def make_shortcut():
+        """在桌面 / 开始菜单创建快捷方式。
+
+        每次调用都重写一遍（幂等），因为用户可能删了图标、也可能把程序
+        挪了目录——后一种情况必须覆盖成新路径，否则快捷方式指向上一个位置。
+        """
+        result = create_shortcuts()
+        if not result.get("ok"):
+            raise UserError(result.get("message") or "创建快捷方式失败。")
+        return result
+
+    @app.post("/api/app/exit")
+    @api_route
+    def exit_app():
+        """彻底退出整个进程（含 waitress 线程），控制台窗口随之关闭。
+
+        只允许本机调用：如果被 --host 0.0.0.0 暴露到内网，任何人点一下
+        就能把别人正在用的服务关掉，这是不能接受的。
+        """
+        if host not in ("127.0.0.1", "localhost", "::1"):
+            raise UserError("当前服务监听在非本机地址，已拒绝远程退出。"
+                            "请在运行程序的电脑上关闭启动窗口。")
+        schedule_exit()
+        log.info("页面请求退出应用（port=%s）", port)
+        return {"stopping": True, "port": port}
 
     @app.post("/api/cleanup")
     @api_route

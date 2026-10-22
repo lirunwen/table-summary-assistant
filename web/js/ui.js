@@ -1,4 +1,5 @@
 /** 通用 UI 工具：图标、转义、格式化、Toast、Modal。 */
+import { api } from './api.js';
 
 const ICONS = '/assets/icons.svg';
 let toastSeq = 0;
@@ -280,4 +281,47 @@ export function skeletonRows(count = 4) {
       <div class="skeleton skeleton-line" style="width:62%"></div>
       <div class="skeleton skeleton-line" style="width:24%;margin-bottom:0"></div>
     </div>`).join('');
+}
+
+/**
+ * 退出整个应用：确认 → 调接口 → 把页面替换成「已退出」。
+ *
+ * 服务端收到请求后会延迟约 0.45 秒硬退出进程，所以这里必须先把界面切走，
+ * 否则用户会对着一个已经连不上的页面，点哪儿都报「无法连接本地服务」。
+ */
+export async function requestExit() {
+  const ok = await confirmDialog({
+    title: '退出表格汇总助手？',
+    message: '退出后本地服务立即停止，这个页面将无法继续使用。下次打开请双击桌面快捷方式，或运行程序目录里的「启动.bat」。',
+    detail: `<div class="warning-note">${icon('alert')}<span>正在进行的上传或生成会中断；已经生成的结果文件不受影响，数据也不会丢。</span></div>`,
+    confirmText: '退出应用',
+    danger: true,
+  });
+  if (!ok) return false;
+  try {
+    await api.exitApp();
+  } catch (err) {
+    toast(err.message || '退出失败。', 'error');
+    return false;
+  }
+  showExited();
+  return true;
+}
+
+export function showExited() {
+  const shell = `
+    <div class="exit-screen">
+      <div class="exit-card">
+        <div class="exit-mark">${icon('check')}</div>
+        <h1>表格汇总助手已退出</h1>
+        <p>本地服务已经停止，启动时的命令行窗口也已关闭。现在可以直接关掉这个浏览器标签页。</p>
+        <div class="exit-tips">
+          <div><strong>再次打开</strong><span>双击桌面「表格汇总助手」快捷方式；没有图标就运行程序目录里的「启动.bat」。</span></div>
+          <div><strong>数据在哪</strong><span>程序目录下的 data 文件夹。退出不会删除任何文件。</span></div>
+        </div>
+      </div>
+    </div>`;
+  document.body.innerHTML = shell;
+  document.body.className = 'exited';
+  document.title = '已退出 · 表格汇总助手';
 }
