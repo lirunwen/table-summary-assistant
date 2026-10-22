@@ -248,7 +248,7 @@ export function withButtonLoading(button, loadingText = '处理中…') {
 }
 
 export function typeName(type) {
-  return { auto: '自动', text: '文本', number: '数值', date: '日期' }[type] || '自动';
+  return { auto: '自动', text: '文本', number: '数值', date: '日期', bool: '是/否' }[type] || '自动';
 }
 
 export function download(url) {

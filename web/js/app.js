@@ -3,6 +3,8 @@ import { loadBootstrap, state } from './store.js';
 import { esc, icon, openModal, requestExit, toast } from './ui.js';
 import dashboardPage from './pages/dashboard.js';
 import sourcesPage from './pages/sources.js';
+import templatesPage from './pages/templates.js';
+import templatePage from './pages/template.js';
 import profilesPage from './pages/profiles.js';
 import profilePage from './pages/profile.js';
 import comparePage from './pages/compare.js';
@@ -16,6 +18,7 @@ let routeSeq = 0;
 const STATIC_ROUTES = {
   '': { page: dashboardPage, nav: 'dashboard', crumb: [{ label: '工作台' }] },
   sources: { page: sourcesPage, nav: 'sources', crumb: [{ label: '工作台', href: '#/' }, { label: '数据源' }] },
+  templates: { page: templatesPage, nav: 'templates', crumb: [{ label: '工作台', href: '#/' }, { label: '数据模板' }] },
   profiles: { page: profilesPage, nav: 'profiles', crumb: [{ label: '工作台', href: '#/' }, { label: '汇总方案' }] },
   compare: { page: comparePage, nav: 'compare', crumb: [{ label: '工作台', href: '#/' }, { label: '数据对比' }] },
   runs: { page: runsPage, nav: 'runs', crumb: [{ label: '工作台', href: '#/' }, { label: '生成记录' }] },
@@ -86,6 +89,11 @@ async function route() {
     page = STATIC_ROUTES[''].page;
     nav = 'dashboard';
     crumb = STATIC_ROUTES[''].crumb;
+  } else if (segments[0] === 'templates' && segments.length === 2) {
+    page = templatePage;
+    nav = 'templates';
+    crumb = [{ label: '工作台', href: '#/' }, { label: '数据模板', href: '#/templates' }, { label: '模板编辑' }];
+    params = { id: decodeURIComponent(segments[1]) };
   } else if (segments[0] === 'profiles' && segments.length === 2) {
     page = profilePage;
     nav = 'profiles';

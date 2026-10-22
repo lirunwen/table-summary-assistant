@@ -67,7 +67,8 @@ huiyi/
 │  ├─ readers.py          Excel / xls / CSV 读取、表头识别、表元数据
 │  ├─ email_reader.py     .msg / .eml 解析、HTML 表格提取
 │  ├─ ingest.py           落盘、类型分派、邮件附件递归登记、删除
-│  ├─ templates.py        目标模板登记、工作表/表头解析
+│  ├─ templates.py        模板文件落盘、工作表/表头解析、从表头派生字段
+│  ├─ tmplib.py           数据模板服务层：字段契约、校验规则、版本、引用关系
 │  ├─ formula.py          Excel 风格公式：词法、语法、白名单函数、逐行求值
 │  ├─ appcontrol.py       桌面快捷方式（PowerShell -EncodedCommand）与进程退出
 │  ├─ engine.py           配置校验、join/append、映射、统计
@@ -83,8 +84,8 @@ huiyi/
 │     ├─ api.js           fetch 封装与错误规范
 │     ├─ store.js         全局数据、数据表选择器、配置规范化
 │     ├─ ui.js            Toast / Modal / 格式化 / 表单片段
-│     ├─ components.js    方案卡片、新建方案、运行详情
-│     └─ pages/           工作台、数据源、方案、编辑、对比、记录、设置
+│     ├─ components.js    方案卡片、新建方案、运行详情、模板→目标列
+│     └─ pages/           工作台、数据源、模板列表/编辑器、方案、编辑、对比、记录、设置
 ├─ samples/               可试用的示例 Excel / CSV / EML / XLS
 ├─ tests/                 端到端 API 冒烟测试、UI 截图工具
 ├─ packaging/             Windows 打包脚本、spec、图标、离线 wheels 脚本
@@ -98,7 +99,9 @@ SQLite 只存“元数据 + 配置”，原始表格与结果文件留在磁盘�
 
 ```text
 sources(id, name, kind, path, size, parent_id, created_at, meta JSON)
-templates(id, name, path, size, created_at, meta JSON)
+templates(id, name, path, size, created_at, updated_at, description, category,
+          tags JSON, status, origin, version, meta JSON)
+template_versions(id, template_id, version, note, snapshot JSON, created_at)
 profiles(id, name, note, config JSON, created_at, updated_at, last_run_at)
 runs(id, profile_id, profile_name, created_at, status, output_path,
      output_name, summary JSON, config_snapshot JSON, error, duration_ms)
@@ -303,6 +306,64 @@ Excel 里缺失的单元格是空的，不是错误。`append` 路径先算所�
 这条 warning 会出现在运行结果的提示区，用户能立刻知道"哪一列、多少行、第一个错在哪"，
 而不是打开 Excel 肉眼找 `#VALUE!`。
 
+## 6.5 数据模板：目标表的结构契约
+
+0.3.0 起模板从方案里独立出来，成为与「数据源」「汇总方案」平级的模块。这一节说明边界
+为什么这么切，以及切完之后哪些事情归谁。
+
+### 边界
+
+```text
+数据模板  只描述「目标表长什么样」
+          列名 / 类型 / 必填 / 校验规则 / 列宽 / 日期格式 / 可选的 Excel 样式底稿
+          不做：关联、合并、去重、数据来源
+
+汇总方案  只描述「数据从哪来、怎么进这些列」
+          主表 / 主键 / 关联表 / 逐列映射 / 公式 / 转换 / 写入方式
+          单向依赖模板：config.target.template_id
+```
+
+这条线的作用是让两边的变更互不牵连：模板改一列，方案里只出现一条「字段有变化」；
+方案换数据源，模板完全不用动。删除被引用的模板会被拦住（`force=1` 才强删），
+避免方案的目标表在用户不知情时失效。
+
+### 字段定义为什么存在 `templates.meta.fields`
+
+字段是**整体使用**的：打开一个模板就要全部字段，编辑一次就是提交一整份结构。单独建
+`template_fields` 表会把「读一个模板」变成 N+1 次查询，换来的只有「按字段搜索」一项，
+而列表页搜索直接遍历 `meta.fields` 里的列名就够了（模板数量级在几百份以内）。
+所以 `meta` 里存 `{sheets, fields, sheet, header_row, warnings}`。
+
+### 两种来源（`origin`）
+
+| origin | 文件从哪来 | 字段变化时怎么处理 |
+| --- | --- | --- |
+| `fields` | 程序按字段生成 | 整份重画 xlsx：表头、列宽、日期格式、下拉都按新字段来 |
+| `upload` | 用户上传的 Excel | 只改表头**单元格文本**，列宽/配色/合并/公式一律不动 |
+
+`upload` 的反向操作是「从文件重读表头」（`PUT {resync:true}`）：文件才是真相，
+此时只更新字段定义、**不**把字段名写回文件，否则会串列。
+
+### 版本
+
+`template_versions` 存 JSON 快照，最多 20 份。触发条件是字段签名变化：
+`fields_signature()` 只比较 `name/type/required/default/width/date_format/template_col`，
+改说明、改示例值不算结构变化，不会产生版本噪音。回滚本身也是一次结构变化，
+所以回滚前会先把当前结构也存一份，回滚可逆。
+
+### 校验：只提示，不阻断
+
+7 种规则：`unique / enum / pattern / min / max / min_len / max_len`。执行时机是
+`/api/preview` 与 `run_profile()`，结果以 `field_validation` + 中文 `warnings`
+返回，不抛异常、不中断生成——数据质量问题应该由人判断怎么处理。
+
+日期类型的判断复用 `utils.parse_date_value`，和 `writer` 写单元格时同一套逻辑，
+所以不会出现「校验通过却写不进去」这类自相矛盾。空值只触发「必填」，其他规则跳过：
+一条记录没有工号，报「必填」就够了，不该再报「格式不对」。
+
+`origin='fields'` 的模板在生成 xlsx 时给 `enum` / `bool` 字段挂 `DataValidation` 下拉，
+让 Excel 里手填也不会超出范围；`upload` 模板不动用户自己的数据验证。
+
 ## 7. 模板写入
 
 1. 复制模板文件到本次运行的独立目录，绝不原地修改模板；
@@ -370,8 +431,21 @@ Excel 里缺失的单元格是空的，不是错误。`append` 路径先算所�
 | PATCH | `/api/sources/:id` | 重命名或调整某张表的表头行 |
 | DELETE | `/api/sources/:id` | 删除数据源（邮件会连同附件） |
 | GET | `/api/table-preview` | 按表 ID 预览前 N 行 |
-| POST | `/api/templates/upload` | 上传目标 Excel 模板 |
-| POST | `/api/templates/:id/inspect` | 按工作表/表头行重新解析 |
+| GET | `/api/template-options` | 字段类型、规则种类、状态等可选值（前后端共用一份） |
+| GET | `/api/templates` | 模板列表：`q/category/tag/status/sort`，返回 `categories/tags/stats` |
+| POST | `/api/templates` | 按字段定义新建模板（同时生成 xlsx） |
+| GET | `/api/templates/:id` | 模板详情：字段、版本、引用它的方案 |
+| PUT | `/api/templates/:id` | 改名称/分类/标签/状态/字段；`resync:true` 表示从文件重读表头 |
+| DELETE | `/api/templates/:id` | 删除；被引用时 400，`?force=1` 强删 |
+| POST | `/api/templates/upload` | 上传 Excel 模板，按表头派生字段 |
+| POST | `/api/templates/:id/inspect` | 按工作表/表头行重新解析（只读，不落库） |
+| POST | `/api/templates/:id/duplicate` | 复制模板 |
+| POST | `/api/templates/:id/versions` | 手动存一个版本快照 |
+| POST | `/api/templates/:id/versions/:vid/restore` | 回滚到某个版本 |
+| GET | `/api/templates/:id/export` | 导出模板定义 JSON（中文文件名走 RFC 5987） |
+| POST | `/api/templates/import` | 导入模板定义 JSON，同名自动加 `(2)` |
+| GET | `/api/templates/:id/file` | 下载模板 xlsx |
+| POST | `/api/templates/:id/validate` | 按字段规则校验一批行，恒返回 200 |
 | POST | `/api/preview` | 不落盘，按当前配置生成前 50 行预览 |
 | POST | `/api/profiles/:id/run` | 保存配置并生成结果 |
 | GET | `/api/runs/:id/download` | 下载结果文件 |
@@ -551,6 +625,12 @@ data/
 - `tests/smoke.py`：Flask test client 端到端覆盖上传、模板、关联汇总、预览、表头调整、运行、下载、两次结果对比、结果对源表、纵向自动匹配、`.xls`、真实 `.msg`、公式注入、模板追加。
 - `tests/ui/check-formula-mapping.mjs`：23 项浏览器断言，覆盖公式按钮、弹窗、
   实时校验状态条、试算表、日期格式下拉与预览列格式化。
+- `tests/test_templates.py`：22 条，盯住模板这条边界——字段清洗与规则校验、改名后
+  Excel 表头真的跟着改、只改说明不产生版本、版本回滚、被引用时删不掉、导入导出往返、
+  上传模板重读表头不串列、日期校验与写入同一套判断、老库迁移补齐新列。
+- `tests/ui/check-templates.mjs`：31 项，覆盖列表页统计/筛选/搜索/多选批量条、
+  编辑页五个标签渲染、改列宽 → 未保存态 → 保存 → 落库、预览弹窗，以及方案侧
+  「按分类分组选模板 + 字段摘要 + 跳转模板库」。
 - `tests/ui/check-template-entry.mjs`：6 项，守住「模板入口在三张卡片第一层」这个回归。
 - `tests/ui/check-app-control.mjs`：12 项，覆盖侧栏退出按钮、设置页两个入口、
   取消不退出、确认后落地页出现、以及**端口真的不再响应**（脚本会关掉被测服务，
@@ -558,7 +638,7 @@ data/
 - `tests/ui_shot.py`：开发期用 Chrome DevTools Protocol 截图与检查浏览器异常。
 - `samples/make_samples.py`：生成可复现的示例文件。
 
-当前基线：`pytest tests -q` → **134 passed**；三个 UI 巡检脚本 41/41 通过。
+当前基线：`pytest tests -q` → **156 passed**；四个 UI 巡检脚本 72/72 通过。
 
 ## 14.1 发布流水线
 
@@ -603,7 +683,8 @@ cmd.exe 解析纯 LF 文件的标签并不可靠，之前能跑属于运气。
   文本分列；以及单元格区域引用（`A1:B2`）——当前只支持 `[字段名]` 按列引用；
 - 方案导入/导出与跨电脑共享；
 - 多工作表/多行复杂表头；
-- 数据校验规则（必填、唯一、枚举）与问题行导出；
+- 模板的字段分组与条件必填（例如「离职」状态下才要求填离职日期）；
+- 校验问题行导出成一张「问题清单」表，方便退回给填报人修改；
 - 通过 Windows COM 调用本机 Excel，精确保留图表/透视表；
 - 通过 Outlook COM 读取 `.pst/.ost`；
 - 局域网只读分享模式（带令牌）。

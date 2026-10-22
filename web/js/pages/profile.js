@@ -6,7 +6,7 @@ import {
 } from '../components.js';
 import {
   activeTableIds, allTables, includedColumns, loadBootstrap,
-  normalizeConfig, state, tableHeaders, tableLabel, templateById,
+  normalizeConfig, state, tableHeaders, tableLabel, templateById, templateDrift,
 } from '../store.js';
 import {
   attr, confirmDialog, emptyState, esc, fmtDate, fmtNumber,
@@ -590,6 +590,7 @@ export default {
           ${isTemplate
             ? (template ? renderTemplateBanner(template) : `<div class="warning-note">${icon('alert')}<span>模板已被删除或不可用，请重新选择模板，或移除模板后新建工作簿。</span></div>`)
             : renderTemplateCta()}
+          ${isTemplate && template ? renderDrift(template) : ''}
           <div class="form-grid mt-16 ${config.target.kind === 'template' ? 'cols-3' : ''}">
             <div class="field">
               <label class="field-label" for="target-sheet">输出工作表</label>
@@ -654,13 +655,41 @@ export default {
       const writeMode = config.target.write_mode === 'append' ? '追加到已有数据之后' : '覆盖模板数据区';
       const headerRow = config.target.header_row || 1;
       const writeCols = (config.target.columns || []).filter((c) => c.included !== false).length;
+      const fields = template.fields || [];
+      const requiredCount = fields.filter((f) => f.required).length;
       return `<div class="template-banner">
         <div class="file-badge template">${icon('file-spreadsheet')}</div>
         <div class="template-banner-main">
           <strong>${esc(template.name)}</strong>
           <p>工作表「${esc(config.target.sheet)}」 · 第 ${headerRow} 行表头 · 写入 ${writeCols} 列 · ${writeMode}</p>
+          <p class="tiny faint mt-4">
+            ${template.category ? `${esc(template.category)} · ` : ''}v${template.version || 1} ·
+            ${fmtNumber(fields.length)} 个字段${requiredCount ? `（${requiredCount} 个必填）` : ''}${
+              template.rules_count ? ` · ${template.rules_count} 条校验` : ''}
+            ${(template.tags || []).length ? ` · ${(template.tags || []).map((t) => esc(t)).join(' / ')}` : ''}
+            · <a class="link-sm" href="#/templates/${encodeURIComponent(template.id)}">打开模板</a>
+          </p>
         </div>
         <button class="btn btn-secondary btn-sm" type="button" data-remove-template>移除模板</button>
+      </div>`;
+    }
+
+    // 模板字段改过之后，方案里的目标列会和契约对不上。这里只提示 + 给一键同步，
+    // 不自动改——用户的列映射是手工配的，静默重建会让人措手不及。
+    function renderDrift(template) {
+      const drift = templateDrift(config);
+      if (!drift || drift.missingTemplate) return '';
+      return `<div class="tpl-drift">
+        ${icon('alert')}
+        <div class="flex-1">
+          <strong>模板字段有变化，和当前目标列对不上</strong>
+          <div class="mt-4">
+            ${drift.added.length ? `新增 ${drift.added.length} 个字段：${drift.added.slice(0, 6).map((n) => esc(n)).join('、')}${drift.added.length > 6 ? '…' : ''}<br>` : ''}
+            ${drift.removed.length ? `模板里已没有：${drift.removed.slice(0, 6).map((n) => esc(n)).join('、')}${drift.removed.length > 6 ? '…' : ''}` : ''}
+          </div>
+          <div class="tiny mt-4" style="opacity:.8">同步会按模板重建目标列；同名同序的列映射会保留，被删掉的列映射会一起清掉。</div>
+        </div>
+        <button class="btn btn-secondary btn-sm" type="button" data-sync-template>${icon('refresh')}一键同步字段</button>
       </div>`;
     }
 
@@ -677,10 +706,10 @@ export default {
               <span class="col-included"><input type="checkbox" data-col-included="${attr(col.key)}" ${col.included !== false ? 'checked' : ''}></span>
               <input class="input input-sm col-name-input" value="${attr(col.name)}" data-col-name="${attr(col.key)}" ${col.included === false ? 'disabled' : ''}>
               <select class="select select-sm" data-col-type="${attr(col.key)}">
-                ${['auto', 'text', 'number', 'date'].map((t) => `<option value="${t}" ${(col.type || 'auto') === t ? 'selected' : ''}>${typeName(t)}</option>`).join('')}
+                ${['auto', 'text', 'number', 'date', 'bool'].map((t) => `<option value="${t}" ${(col.type || 'auto') === t ? 'selected' : ''}>${typeName(t)}</option>`).join('')}
               </select>
               <span class="tiny faint">第 ${Number(col.template_col) + 1} 列</span>
-              <span class="tiny faint">${col.included === false ? '保持原样' : '写入数据'}</span>
+              <span class="tiny faint">${col.required ? '<span class="rule-chip required">必填</span>' : ''}${col.included === false ? '保持原样' : '写入数据'}</span>
               <span></span>
             </div>` : `
             <div class="col-row">
@@ -1025,6 +1054,7 @@ export default {
         btn.addEventListener('click', openTemplateDialog);
       });
       view.querySelector('[data-remove-template]')?.addEventListener('click', removeTemplate);
+      view.querySelector('[data-sync-template]')?.addEventListener('click', syncTemplateFields);
       view.querySelector('[data-adjust-header]')?.addEventListener('click', openAdjustHeader);
       view.querySelector('[data-write-mode]')?.addEventListener('change', (e) => {
         config.target.write_mode = e.target.value;
@@ -1197,15 +1227,22 @@ export default {
         subEl.textContent = '选择已有模板，或上传一个新的 Excel 模板。';
         const templates = state.templates || [];
         body.innerHTML = `
-          ${templates.length ? `<div class="stack" style="gap:9px">${templates.map((t) => `
+          ${templates.length ? `<div class="stack" style="gap:9px">${templates.map((t) => {
+            const fields = t.fields || [];
+            const required = fields.filter((f) => f.required).length;
+            return `
             <div class="template-banner">
               <div class="file-badge template">${icon('file-spreadsheet')}</div>
               <div class="template-banner-main">
                 <strong>${esc(t.name)}</strong>
-                <p>${(t.meta?.sheets || []).length} 个工作表 · 上传于 ${fmtDate(t.created_at, false)}</p>
+                <p>${t.category ? `${esc(t.category)} · ` : ''}v${t.version || 1} · ${fmtNumber(t.field_count || fields.length)} 个字段${
+                  required ? `（${required} 个必填）` : ''}${t.rules_count ? ` · ${t.rules_count} 条校验` : ''}${
+                  (t.tags || []).length ? ` · ${(t.tags || []).map((x) => esc(x)).join(' / ')}` : ''}</p>
               </div>
+              <a class="btn btn-ghost btn-sm" href="#/templates/${encodeURIComponent(t.id)}" title="去模板库编辑字段">${icon('settings')}</a>
               <button class="btn btn-secondary btn-sm" type="button" data-pick-template="${attr(t.id)}">选择</button>
-            </div>`).join('')}</div>` : `<div class="empty small"><div class="empty-icon">${icon('file-spreadsheet')}</div><h3>还没有模板</h3><p>上传一份 Excel 汇总表，系统会读取表头，保留原有格式。</p></div>`}
+            </div>`;
+          }).join('')}</div>` : `<div class="empty small"><div class="empty-icon">${icon('file-spreadsheet')}</div><h3>还没有模板</h3><p>先去「数据模板」定义目标表的字段，或者现在上传一份现成的 Excel 表头。</p><a class="btn btn-secondary btn-sm" href="#/templates">去数据模板</a></div>`}
           <div class="rail-divider"></div>
           <div class="flex items-center justify-between gap-12 flex-wrap">
             <div><div class="strong small">上传新模板</div><div class="tiny faint mt-4">支持 .xlsx / .xlsm，表头可以在下一步调整。</div></div>
@@ -1270,6 +1307,30 @@ export default {
       }
 
       renderLibrary();
+    }
+
+    /** 按模板当前字段重建目标列，尽量保住已有映射（同名列 key 不变）。 */
+    function syncTemplateFields() {
+      const template = targetTemplate();
+      if (!template) return;
+      const drift = templateDrift(config);
+      const willDrop = drift?.removed || [];
+      confirmDialog({
+        title: '按模板同步目标列',
+        message: '目标列会按模板字段重建，列名与顺序以模板为准。',
+        detail: `<div class="warning-note">${icon('alert')}<span>${
+          willDrop.length ? `这些列在模板里已经没有了，同步后会被移除：${willDrop.slice(0, 8).map((n) => esc(n)).join('、')}${willDrop.length > 8 ? '…' : ''}` : '同名列的映射会保留。'
+        }</span></div>`,
+        confirmText: '同步',
+      }).then((ok) => {
+        if (!ok) return;
+        const sheet = (template.meta?.sheets || template.sheets || []).find((s) => s.name === config.target.sheet)
+          || { name: config.target.sheet, header_row: config.target.header_row, headers: (template.fields || []).map((f) => f.name) };
+        applyTemplateToTarget(config, template, sheet);
+        autoMap({ silent: true });
+        markDirty(true);
+        toast(`已按模板「${template.name}」同步 ${config.target.columns.length} 个目标列。`, 'ok');
+      });
     }
 
     function removeTemplate() {

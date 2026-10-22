@@ -134,6 +134,46 @@ export function templateById(id) {
   return state.templates.find((t) => t.id === id) || null;
 }
 
+/** 模板字段（契约）。旧数据没有 fields 时返回空数组，调用方自己兜底。 */
+export function templateFields(id) {
+  return templateById(id)?.fields || [];
+}
+
+/** 模板所有标签，按出现次数降序——列表页的标签筛选直接用。 */
+export function templateTags() {
+  const counter = new Map();
+  for (const t of state.templates || []) {
+    for (const tag of t.tags || []) counter.set(tag, (counter.get(tag) || 0) + 1);
+  }
+  return [...counter.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count);
+}
+
+export function templateCategories() {
+  const counter = new Map();
+  for (const t of state.templates || []) {
+    if (t.category) counter.set(t.category, (counter.get(t.category) || 0) + 1);
+  }
+  return [...counter.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count);
+}
+
+/** 方案目标列与模板字段的差异——用于提示「模板已更新，字段对不上了」。 */
+export function templateDrift(config) {
+  const target = config?.target || {};
+  if (target.kind !== 'template' || !target.template_id) return null;
+  const template = templateById(target.template_id);
+  if (!template) return { missingTemplate: true, added: [], removed: [], renamed: [] };
+  const fieldNames = (template.fields || []).map((f) => f.name);
+  const colNames = (target.columns || []).filter((c) => c.included !== false).map((c) => c.name);
+  const added = fieldNames.filter((n) => !colNames.includes(n));
+  const removed = colNames.filter((n) => !fieldNames.includes(n));
+  if (!added.length && !removed.length) return null;
+  return { missingTemplate: false, added, removed, renamed: [], template };
+}
+
 export function runById(id) {
   return state.runs.find((r) => r.id === id) || null;
 }

@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import datetime as dt
+import io
+import json
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -32,7 +35,8 @@ from .engine import Registry, build, validate_config
 from .appcontrol import create_shortcuts, launch_target, schedule_exit, supports_shortcut
 from .formula import FUNCTION_CATALOG, FormulaError, FormulaSyntaxError, compile_formula
 from .ingest import delete_source, ingest_upload
-from .templates import delete_template, ingest_template, inspect_sheet, template_by_id
+from . import tmplib
+from .templates import ingest_template, inspect_sheet, template_by_id
 from .utils import UserError, display_value, now_iso, safe_filename, uid
 from .writer import DATE_FORMATS, DEFAULT_DATE_FORMAT, write_output
 
@@ -92,10 +96,6 @@ def _source_tree() -> list[dict]:
 
     sort_tree(roots)
     return roots
-
-
-def _public_template(t: dict) -> dict:
-    return {k: v for k, v in t.items() if k != "path"}
 
 
 def _public_profile(p: dict) -> dict:
@@ -278,7 +278,7 @@ def create_app(port: int | None = None, host: str = "127.0.0.1") -> Flask:
         sources = _source_tree()
         profiles = [_public_profile(p) for p in db.profile_rows()]
         runs = [_public_run(r) for r in db.run_rows(100)]
-        templates = [_public_template(t) for t in db.template_rows()]
+        templates = tmplib.list_templates()["templates"]
         flat_sources = []
         def walk(items):
             for s in items:
@@ -421,14 +421,65 @@ def create_app(port: int | None = None, host: str = "127.0.0.1") -> Flask:
             "source_id": source["id"],
         }
 
+    # ---- 数据模板：与汇总方案平级的独立模块 -------------------------------
+    @app.get("/api/template-options")
+    @api_route
+    def template_options():
+        """字段类型、校验规则、状态、日期格式的词汇表，前端不再各写一份。"""
+        return {
+            "types": tmplib.FIELD_TYPES,
+            "rules": tmplib.RULE_KINDS,
+            "status": tmplib.TEMPLATE_STATUS,
+            "date_formats": list(DATE_FORMATS.keys()),
+            "max_fields": 200,
+            "ref_syntax": "[字段名]",
+        }
+
+    @app.get("/api/templates")
+    @api_route
+    def list_templates():
+        return tmplib.list_templates(
+            q=request.args.get("q") or "",
+            category=request.args.get("category") or "",
+            tag=request.args.get("tag") or "",
+            status=request.args.get("status") or "all",
+            sort=request.args.get("sort") or "updated",
+        )
+
+    @app.post("/api/templates")
+    @api_route
+    def create_template():
+        payload = request.get_json(silent=True) or {}
+        detail = tmplib.create_template(payload)
+        return {"template": detail, "templates": tmplib.list_templates()["templates"]}
+
+    @app.get("/api/templates/<template_id>")
+    @api_route
+    def get_template(template_id):
+        return {"template": tmplib.template_detail(template_id)}
+
+    @app.put("/api/templates/<template_id>")
+    @api_route
+    def update_template(template_id):
+        payload = request.get_json(silent=True) or {}
+        detail = tmplib.update_template(template_id, payload)
+        return {"template": detail, "templates": tmplib.list_templates()["templates"]}
+
     @app.post("/api/templates/upload")
     @api_route
     def upload_template():
         f = request.files.get("file")
         if not f or not f.filename:
             raise UserError("请选择模板文件。")
-        record = ingest_template(f)
-        return {"template": _public_template(record), "templates": [_public_template(t) for t in db.template_rows()]}
+        extra = {
+            "name": request.form.get("name") or "",
+            "description": request.form.get("description") or "",
+            "category": request.form.get("category") or "",
+            "tags": [t for t in (request.form.get("tags") or "").split(",") if t.strip()],
+        }
+        record = ingest_template(f, extra)
+        return {"template": tmplib.template_detail(record["id"]),
+                "templates": tmplib.list_templates()["templates"]}
 
     @app.post("/api/templates/<template_id>/inspect")
     @api_route
@@ -437,14 +488,85 @@ def create_app(port: int | None = None, host: str = "127.0.0.1") -> Flask:
         sheet = payload.get("sheet")
         if not sheet:
             raise UserError("请选择模板工作表。")
-        info = inspect_sheet(template_id, sheet, payload.get("header_row"))
+        row = template_by_id(template_id)
+        if not row:
+            raise UserError("模板不存在或已删除。")
+        existing = (row.get("meta") or {}).get("fields") or []
+        info = inspect_sheet(template_id, sheet, payload.get("header_row"), existing)
         return {"sheet": info}
+
+    @app.post("/api/templates/<template_id>/duplicate")
+    @api_route
+    def duplicate_template(template_id):
+        detail = tmplib.duplicate_template(template_id, (request.get_json(silent=True) or {}).get("name") or "")
+        return {"template": detail, "templates": tmplib.list_templates()["templates"]}
 
     @app.delete("/api/templates/<template_id>")
     @api_route
     def remove_template(template_id):
-        delete_template(template_id)
-        return {"templates": [_public_template(t) for t in db.template_rows()]}
+        force = str(request.args.get("force") or "").lower() in ("1", "true", "yes")
+        result = tmplib.delete_template(template_id, force=force)
+        return {**result, "templates": tmplib.list_templates()["templates"]}
+
+    @app.post("/api/templates/<template_id>/versions")
+    @api_route
+    def save_template_version(template_id):
+        payload = request.get_json(silent=True) or {}
+        tmplib.save_version(template_id, str(payload.get("note") or ""))
+        return {"template": tmplib.template_detail(template_id)}
+
+    @app.post("/api/templates/<template_id>/versions/<version_id>/restore")
+    @api_route
+    def restore_template_version(template_id, version_id):
+        detail = tmplib.restore_version(template_id, version_id)
+        return {"template": detail, "templates": tmplib.list_templates()["templates"]}
+
+    @app.get("/api/templates/<template_id>/export")
+    @api_route
+    def export_template(template_id):
+        payload = tmplib.export_template(template_id)
+        # 下载名保留中文：Werkzeug 会按 RFC 5987 编码，浏览器能正确显示；
+        # 只要把路径分隔符和 Windows 非法字符换成空格即可。
+        clean = re.sub(r'[\\/:*?"<>|]+', " ", str(payload["template"]["name"] or "")).strip() or "模板"
+        body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        return send_file(
+            io.BytesIO(body),
+            mimetype="application/json",
+            as_attachment=True,
+            download_name=f"{clean[:60]} 模板定义.json",
+        )
+
+    @app.post("/api/templates/import")
+    @api_route
+    def import_template():
+        payload = request.get_json(silent=True) or {}
+        detail = tmplib.import_template(payload)
+        return {"template": detail, "templates": tmplib.list_templates()["templates"]}
+
+    @app.get("/api/templates/<template_id>/file")
+    @api_route
+    def download_template_file(template_id):
+        row = template_by_id(template_id)
+        if not row:
+            raise UserError("模板不存在或已删除。")
+        path = Path(row.get("path") or "")
+        if not path.exists():
+            raise UserError("模板文件已丢失，请重新上传或由字段定义重建。")
+        return send_file(path, as_attachment=True, download_name=path.name)
+
+    @app.post("/api/templates/<template_id>/validate")
+    @api_route
+    def validate_template_rows(template_id):
+        """按模板字段规则校验一份输出数据（给方案预览用）。"""
+        payload = request.get_json(silent=True) or {}
+        row = template_by_id(template_id)
+        if not row:
+            raise UserError("模板不存在或已删除。")
+        fields = (row.get("meta") or {}).get("fields") or []
+        headers = payload.get("headers") or []
+        rows = payload.get("rows") or []
+        first = int(payload.get("first_row") or 2)
+        return {"validation": tmplib.validate_rows(fields, headers, rows, first_data_row=first)}
 
     @app.post("/api/profiles")
     @api_route
@@ -637,6 +759,8 @@ def create_app(port: int | None = None, host: str = "127.0.0.1") -> Flask:
             "lookups": result["lookups"],
             "sources": result["sources"],
             "validation": validate_config(config),
+            # 模板字段规则的校验结果：命中了哪些规则、第几行、什么值
+            "field_validation": tmplib.validate_config_rows(config, result),
         }
 
     @app.post("/api/profiles/<profile_id>/run")
@@ -681,6 +805,18 @@ def create_app(port: int | None = None, host: str = "127.0.0.1") -> Flask:
                 "size": output["size"],
             },
         }
+        # 模板字段规则校验：只提示、不阻断——数据质量问题应该由人决定怎么处理
+        field_validation = tmplib.validate_config_rows(config, result)
+        if field_validation is not None:
+            summary["field_validation"] = field_validation
+            if field_validation.get("count"):
+                first = (field_validation.get("violations") or [{}])[0]
+                summary["warnings"] = [
+                    *summary["warnings"],
+                    f"按模板字段规则检查出 {field_validation['count']} 处问题，"
+                    f"首个在第 {first.get('row')} 行「{first.get('field')}」：{first.get('reason')}。"
+                    "结果已照常生成，建议核对后在模板里调整规则或修数据。",
+                ]
         ts = now_iso()
         duration = result["stats"].get("duration_ms", 0)
         db.execute(

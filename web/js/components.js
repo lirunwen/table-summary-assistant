@@ -105,10 +105,34 @@ export function columnsFromSheet(sheet, existing = []) {
   });
 }
 
+/**
+ * 由模板生成目标列。模板字段是「契约」，所以列名、类型、列宽、必填都从字段来；
+ * 已经配过的列按列名对齐，保留 key（mappings 靠 key 索引，不能丢）。
+ * 老模板没有 fields 时退回按工作表表头推导。
+ */
+export function columnsFromTemplate(template, sheet, existing = []) {
+  const fields = template?.fields || [];
+  const byName = new Map(existing.map((c) => [c.name, c]));
+  if (!fields.length) return columnsFromSheet(sheet, existing);
+  return fields.map((field, index) => {
+    const old = byName.get(field.name);
+    return {
+      key: old?.key || `c_${Math.random().toString(36).slice(2, 9)}`,
+      name: field.name,
+      type: field.type && field.type !== 'auto' ? field.type : (old?.type || 'auto'),
+      width: field.width || old?.width || 14,
+      included: old?.included !== false,
+      template_col: index,
+      required: !!field.required,
+      date_format: field.date_format || '',
+    };
+  });
+}
+
 export function applyTemplateToTarget(config, template, sheet) {
   const oldCols = config.target?.columns || [];
   const oldMappings = config.mappings || {};
-  const newCols = columnsFromSheet(sheet, oldCols);
+  const newCols = columnsFromTemplate(template, sheet, oldCols);
   const newMappings = {};
   for (const col of newCols) {
     if (oldMappings[col.key]) newMappings[col.key] = oldMappings[col.key];
@@ -117,8 +141,8 @@ export function applyTemplateToTarget(config, template, sheet) {
     ...config.target,
     kind: 'template',
     template_id: template.id,
-    sheet: sheet.name,
-    header_row: sheet.header_row || 1,
+    sheet: sheet?.name || template.sheet || '汇总',
+    header_row: sheet?.header_row || template.header_row || 1,
     write_mode: config.target?.write_mode || 'replace',
     columns: newCols,
   };
@@ -266,16 +290,23 @@ export function openCreateProfileModal({ onCreated } = {}) {
       });
       return;
     }
-    const sheets = template.meta?.sheets || [];
+    const sheets = template.meta?.sheets || template.sheets || [];
     if (!sheets.some((s) => s.name === sheetName)) sheetName = sheets[0]?.name || '';
     const sheet = currentSheet(template);
+    const fields = template.fields || [];
+    const fieldChips = fields.length
+      ? fields.slice(0, 10).map((f) => `<span class="chip chip-plain">${esc(f.name)}${
+          f.required ? '<i class="req-dot" title="必填"></i>' : ''
+        }</span>`).join('') + (fields.length > 10 ? `<span class="chip">+${fields.length - 10}</span>` : '')
+      : (sheet?.headers || []).slice(0, 10).map((h) => `<span class="chip chip-plain">${esc(h)}</span>`).join('');
     panel.innerHTML = `
       <div class="form-grid cols-2">
         <div class="field">
-          <label class="field-label" for="np-template">模板</label>
+          <label class="field-label" for="np-template">从模板库选择</label>
           <select class="select" id="np-template">
-            ${(state.templates || []).map((t) => `<option value="${attr(t.id)}" ${t.id === templateId ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
+            ${templateOptionsHtml(templateId)}
           </select>
+          <div class="field-hint">先有模板，再有方案：模板定义目标表长什么样。</div>
         </div>
         <div class="field">
           <label class="field-label" for="np-sheet">使用哪个工作表</label>
@@ -288,13 +319,17 @@ export function openCreateProfileModal({ onCreated } = {}) {
       </div>
       ${sheet ? `<div class="tpl-summary mt-12">
         <div class="tpl-summary-head">${icon('file-spreadsheet')}
-          <strong>${esc(sheet.name)}</strong>
-          <span class="tiny faint">第 ${sheet.header_row} 行表头 · ${(sheet.headers || []).length} 列 · ${fmtNumber(sheet.row_count || 0)} 行示例数据</span>
+          <strong>${esc(template.name)}</strong>
+          ${template.category ? `<span class="chip chip-plain">${esc(template.category)}</span>` : ''}
+          ${(template.tags || []).map((t) => `<span class="chip">${esc(t)}</span>`).join('')}
+          <span class="tiny faint">v${template.version || 1}</span>
         </div>
-        <div class="flex flex-wrap gap-6 mt-8">
-          ${(sheet.headers || []).slice(0, 8).map((h) => `<span class="chip chip-plain">${esc(h)}</span>`).join('')}
-          ${(sheet.headers || []).length > 8 ? `<span class="chip">+${sheet.headers.length - 8}</span>` : ''}
+        <div class="tiny faint mt-6">
+          工作表「${esc(sheet.name)}」 · 第 ${sheet.header_row} 行表头 · ${fields.length || (sheet.headers || []).length} 个字段${
+            template.rules_count ? ` · ${template.rules_count} 条校验规则` : ''}
         </div>
+        <div class="flex flex-wrap gap-6 mt-8">${fieldChips}</div>
+        <div class="mt-8"><a class="link-sm" href="#/templates/${encodeURIComponent(template.id)}">在模板库里查看 / 修改字段 ${icon('arrow-right', 'icon-sm')}</a></div>
       </div>${ruleList(sheet.header_row || 1)}` : `<div class="warning-note">${icon('alert')}<span>这份模板里没有识别到表头行，请换一份模板或换个工作表。</span></div>`}
       <div class="mt-10"><button class="btn btn-ghost btn-sm" type="button" data-go-upload>${icon('upload')}改上传一份新模板</button></div>`;
 
@@ -311,6 +346,20 @@ export function openCreateProfileModal({ onCreated } = {}) {
       outputMode = 'upload';
       renderOutputPanel();
     });
+  }
+
+  /** 模板下拉：按分类分组，选项里带上字段数，避免同名模板选错。 */
+  function templateOptionsHtml(selectedId) {
+    const groups = new Map();
+    for (const t of state.templates || []) {
+      const key = t.category || '未分类';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(t);
+    }
+    return [...groups.entries()].map(([category, items]) => `
+      <optgroup label="${attr(category)}">
+        ${items.map((t) => `<option value="${attr(t.id)}" ${t.id === selectedId ? 'selected' : ''}>${esc(t.name)} · ${fmtNumber(t.field_count || (t.fields || []).length)} 列${t.status === 'archived' ? '（已归档）' : ''}</option>`).join('')}
+      </optgroup>`).join('');
   }
 
   // 小屏幕上弹窗内容比可视区高：切换输出方式后把面板滚进视野，

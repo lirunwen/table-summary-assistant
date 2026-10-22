@@ -57,10 +57,73 @@ export const api = {
     return request(`/api/table-preview?${qs.toString()}`);
   },
 
-  uploadTemplate(file) {
+  uploadTemplate(file, extra = {}) {
     const fd = new FormData();
     fd.append('file', file, file.name);
+    Object.entries(extra).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') fd.append(k, Array.isArray(v) ? v.join(',') : v);
+    });
     return request('/api/templates/upload', { method: 'POST', body: fd });
+  },
+
+  templateOptions() {
+    return request('/api/template-options');
+  },
+
+  listTemplates(params = {}) {
+    const qs = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
+    });
+    const suffix = qs.toString();
+    return request(`/api/templates${suffix ? `?${suffix}` : ''}`);
+  },
+
+  getTemplate(id) {
+    return request(`/api/templates/${encodeURIComponent(id)}`);
+  },
+
+  createTemplate(payload) {
+    return request('/api/templates', { method: 'POST', body: payload });
+  },
+
+  updateTemplate(id, payload) {
+    return request(`/api/templates/${encodeURIComponent(id)}`, { method: 'PUT', body: payload });
+  },
+
+  duplicateTemplate(id, name = '') {
+    return request(`/api/templates/${encodeURIComponent(id)}/duplicate`, { method: 'POST', body: { name } });
+  },
+
+  deleteTemplate(id, force = false) {
+    return request(`/api/templates/${encodeURIComponent(id)}${force ? '?force=1' : ''}`, { method: 'DELETE' });
+  },
+
+  saveTemplateVersion(id, note = '') {
+    return request(`/api/templates/${encodeURIComponent(id)}/versions`, { method: 'POST', body: { note } });
+  },
+
+  restoreTemplateVersion(id, versionId) {
+    return request(`/api/templates/${encodeURIComponent(id)}/versions/${encodeURIComponent(versionId)}/restore`, { method: 'POST' });
+  },
+
+  importTemplate(payload) {
+    return request('/api/templates/import', { method: 'POST', body: payload });
+  },
+
+  templateExportUrl(id) {
+    return `/api/templates/${encodeURIComponent(id)}/export`;
+  },
+
+  templateFileUrl(id) {
+    return `/api/templates/${encodeURIComponent(id)}/file`;
+  },
+
+  validateWithTemplate(id, headers, rows, firstRow = 2) {
+    return request(`/api/templates/${encodeURIComponent(id)}/validate`, {
+      method: 'POST',
+      body: { headers, rows, first_row: firstRow },
+    });
   },
 
   inspectTemplate(templateId, sheet, headerRow) {
@@ -68,10 +131,6 @@ export const api = {
       method: 'POST',
       body: { sheet, header_row: headerRow },
     });
-  },
-
-  deleteTemplate(id) {
-    return request(`/api/templates/${encodeURIComponent(id)}`, { method: 'DELETE' });
   },
 
   createProfile(payload) {

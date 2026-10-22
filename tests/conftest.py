@@ -37,7 +37,8 @@ def app():
 @pytest.fixture()
 def client(app):
     """每个用例从干净的表开始。"""
-    for table in ("compares", "runs", "profiles", "templates", "sources", "settings"):
+    for table in ("compares", "runs", "profiles", "template_versions",
+                  "templates", "sources", "settings"):
         db.execute(f"DELETE FROM {table}")
     db.init_db()  # 重新写入默认设置
     with app.test_client() as c:
