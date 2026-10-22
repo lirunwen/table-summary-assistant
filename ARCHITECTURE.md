@@ -558,7 +558,7 @@ data/
 - `tests/ui_shot.py`：开发期用 Chrome DevTools Protocol 截图与检查浏览器异常。
 - `samples/make_samples.py`：生成可复现的示例文件。
 
-当前基线：`pytest tests -q` → **126 passed**；三个 UI 巡检脚本 41/41 通过。
+当前基线：`pytest tests -q` → **134 passed**；三个 UI 巡检脚本 41/41 通过。
 
 ## 14.1 发布流水线
 
@@ -569,6 +569,33 @@ data/
 - 步骤：装依赖（含 `red-black-tree-mod` sdist 解包失败的兜底）→ 校验 import →
   跑 `pytest` → 跑 `smoke.py` → PyInstaller → 组装目录 → zip → Artifacts / Release；
 - 产物：`TableSummaryAssistant-vX.Y.Z-windows-x64.zip`，解压双击「启动.bat」即用。
+
+## 14.2 打包：为什么既不用 `tar -a` 也不用 `Compress-Archive`
+
+压缩这一步踩过两次坑，都跟中文文件名有关，现在统一交给 `packaging/make_zip.py`。
+
+**`tar -a -c -f`（bsdtar）** 本身是 Unicode 友好的，问题出在**参数传递**：
+`tar.exe` 是普通 Win32 程序，它的命令行经 `CreateProcess` 按**进程 ANSI 代码页**
+（en-US runner 上是 cp1252）转换。`表格汇总助手` 这六个字在交给 tar **之前**
+就已经变成 `??????`，属于不可逆的有损转换——打出来的包里目录名就是六个问号，
+`安装.bat` 变成 `????.bat`。v0.2.4 的线上包就是这么坏的，当时肉眼没发现，
+是解包后读 zip 条目字节才确认（`b'??????/'`）。
+
+**`Compress-Archive`** 是 .NET 实现，写中文名时不置 UTF-8 标志位（bit 11），
+在非中文 Windows 或第三方解压工具里显示成乱码。
+
+**Python `zipfile`** 用宽字符 API 取路径，对非 ASCII 名自动置 bit 11，两个坑都绕开。
+脚本在写完 zip 后会**重新打开自检**：
+
+1. 条目名里不能出现 `?`（有就说明又被 ANSI 转过）；
+2. 非 ASCII 名必须带 bit 11；
+3. 条目数不低于 `--expect-min`（CI 传 500），防止打出空壳包。
+
+任一条不满足就让构建非零退出，红在 CI 上而不是红在同事的电脑上。
+`tests/test_packaging.py` 在本地复现这三条判定。
+
+另外 `.gitattributes` 把 `*.bat` 钉成 CRLF：`install.bat` 里有 `goto :done`，
+cmd.exe 解析纯 LF 文件的标签并不可靠，之前能跑属于运气。
 
 ## 15. 后续可扩展
 

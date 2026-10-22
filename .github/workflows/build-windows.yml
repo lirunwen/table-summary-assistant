@@ -118,22 +118,14 @@ jobs:
           # zip 名必须全 ASCII：softprops/action-gh-release 会把文件名里的非 ASCII
           # 字符直接删掉，中文前缀会导致资产变成 "-v0.2.0-windows-x64.zip"。
           $zip = "dist/TableSummaryAssistant-v$ver-windows-x64.zip"
-          # 优先用系统自带 bsdtar（Win10 1803+）：Compress-Archive 用 .NET 写中文文件名
-          # 时不带 UTF-8 标志位（bit 11），换一台非中文 Windows 或用第三方解压工具
-          # 打开就是乱码目录名——安装体验直接卡在第一步。
-          $made = $false
-          try {
-            tar -a -c -f $zip -C "dist/stage" "表格汇总助手"
-            if (Test-Path $zip) {
-              $entries = (tar -tf $zip | Measure-Object).Count
-              if ($entries -gt 500) { $made = $true }
-            }
-          } catch { $made = $false }
-          if (-not $made) {
-            Write-Host "bsdtar 打包失败，回退到 Compress-Archive"
-            if (Test-Path $zip) { Remove-Item $zip -Force }
-            Compress-Archive -Path $stage -DestinationPath $zip -Force
-          }
+          # 压缩交给 packaging/make_zip.py，两个历史坑一次绕开：
+          #   1) tar.exe 的 argv 要过 CreateProcess 的 ANSI 代码页，en-US runner
+          #      上「表格汇总助手」在交给 tar 之前就被替换成六个问号，包解开后
+          #      「安装.bat」变成「????.bat」，用户不知道点哪个；
+          #   2) Compress-Archive 写中文名不带 UTF-8 标志位（bit 11），换机器解压乱码。
+          # 脚本自己会校验条目数与标志位，不达标直接非零退出让构建红掉。
+          python packaging/make_zip.py --src dist/stage --out $zip --expect-min 500
+          if ($LASTEXITCODE -ne 0) { throw "打包失败：make_zip.py 退出码 $LASTEXITCODE" }
           "ZIP_NAME=$(Split-Path $zip -Leaf)" >> $env:GITHUB_ENV
 
           # 体积体检：extract-msg 会拖进 oletools / cryptography 等一串依赖
@@ -202,9 +194,9 @@ jobs:
 
             - Windows 10 / 11（64 位）
             - 全程离线，数据只保存在程序目录的 `data\` 文件夹
-            - 首次启动会自动打开浏览器；关闭黑色窗口即停止服务
+            - 首次启动会自动打开浏览器；关闭黑色窗口或点页面里的「退出应用」都会停止服务
 
             ## 说明
 
             本包由 GitHub Actions 在 `windows-latest` 上自动构建，
-            构建前已通过 `tests/test_regressions.py` 与 `tests/smoke.py`。
+            构建前已通过全量单元测试 `pytest tests` 与端到端冒烟测试 `tests/smoke.py`。

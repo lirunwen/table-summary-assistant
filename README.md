@@ -335,7 +335,10 @@ python tests/smoke.py
 PowerShell 输出归一化、非 Windows 时的降级提示、退出钩子、以及
 「监听 0.0.0.0 时拒绝远程退出」。
 
-当前基线 **126 passed**。
+`tests/test_packaging.py`（8 条）守住打包这一步：中文文件名必须带 UTF-8 标志位、
+名字里不能出现 `?` 残骸、条目数低于下限要报错、暂存目录必须只有一个顶层目录。
+
+当前基线 **134 passed**。
 
 界面另有三个无头浏览器巡检脚本（`tests/ui/`），共 41 项断言：公式弹窗与日期格式
 （23）、模板入口（6）、退出与快捷方式（12，最后一个会把被测服务真的关掉）。
@@ -372,6 +375,25 @@ HUIYI_DATA_DIR="$PWD/data/_demo" python app.py --no-browser
 
 ## 更新日志
 
+### 0.2.5
+
+修一个只在 CI 上才暴露、但会毁掉安装体验的打包缺陷：
+
+- **中文文件名被打成问号**。0.2.4 的包解开后目录叫 `??????`，`安装.bat` 变成
+  `????.bat`。根因是 `tar.exe` 的命令行参数要经过 `CreateProcess` 的 **ANSI 代码页**，
+  GitHub Actions 的 `windows-latest` 是 en-US（cp1252），中文在交给 tar **之前**
+  就已经被替换成 `?`，属于不可逆的有损转换。
+  - 换用 `packaging/make_zip.py`：Python 用宽字符 API 拿路径，`zipfile` 对非 ASCII 名
+    自动置 UTF-8 标志位（bit 11），两个坑一次绕开。
+  - 打包后**重新打开 zip 自检**：条目数下限、中文名是否带标志位、名字里有没有 `?`，
+    任一不达标就让构建红掉，不再靠肉眼发现。
+  - 新增 `tests/test_packaging.py`（8 条）把这三条行为钉死，本机就能跑。
+- **`.bat` 强制 CRLF**：新增 `.gitattributes`，同时 `make_zip.py` 在写入 zip 时
+  再转一次。`install.bat` 里有 `goto :done`，cmd.exe 解析纯 LF 文件的标签并不可靠，
+  之前是靠运气；现在不依赖检出配置，包里一定是 CRLF。
+- 0.2.4 的 Release 已下架，改以本版为准（两者功能相同，只是包里的文件名正常了）。
+- CI 与 `packaging/build_windows.bat` 的压缩步骤统一改为调用该脚本。
+
 ### 0.2.4
 
 安装与退出流程补全（这两步之前是空白：解压后没有桌面图标，退出只能找黑窗口）：
@@ -380,7 +402,8 @@ HUIYI_DATA_DIR="$PWD/data/_demo" python app.py --no-browser
   快捷方式，图标取自 `HuiYi.exe` 本身，工作目录与参数都已配好；创建完可直接启动。
   - 快捷方式指向 `HuiYi.exe` 而不是 `.bat`，双击不会先闪一个 cmd 窗口再拉起程序。
   - 中文路径全程不经过 cmd 传参：`安装.bat` 只调 `HuiYi.exe --create-shortcut`，
-    PowerShell 脚本用 UTF-16LE + base64（`-EncodedCommand`）传入，绕开 OEM 代码页乱码。
+    PowerShell 脚本写成**带 BOM 的 `.ps1`** 再用 `-File` 执行，绕开 OEM 代码页乱码。
+    （不用 `-EncodedCommand`：那是一长串 base64，属于企业 EDR 的重点特征，容易被拦。）
   - 桌面路径用 `[Environment]::GetFolderPath('Desktop')` 取，兼容 OneDrive / 域环境重定向。
   - 幂等：重复运行覆盖旧图标；**程序换目录后再运行一次**，图标就会指向新路径。
 - **页面内「退出应用」**：侧栏底部与「设置 → 快捷方式与退出」各一个入口，确认后
@@ -392,13 +415,14 @@ HUIYI_DATA_DIR="$PWD/data/_demo" python app.py --no-browser
     否则任何人都能关掉别人正在用的服务。
 - **页面内「创建快捷方式」**：`POST /api/app/shortcut`，与 `安装.bat` 共用同一段代码；
   非 Windows 环境按钮置灰并给出说明，而不是弹一个看不懂的报错。
-- **打包改善**：zip 改用系统自带 `bsdtar`（`tar -a`）生成。`Compress-Archive` 写中文
-  文件名时不带 UTF-8 标志位（bit 11），换台非中文 Windows 或用第三方解压工具打开
-  就是乱码目录名——安装第一步就卡住。CI 里加了 `tar` 失败自动回退。
+- **打包改善**：zip 改由 `packaging/make_zip.py`（Python 标准库 `zipfile`）生成，
+  中文文件名一定带 UTF-8 标志位（bit 11）；`Compress-Archive` 不写这个标志位，
+  换台非中文 Windows 或用第三方解压工具打开就是乱码目录名——安装第一步就卡住。
+  脚本打包后会重新打开 zip 自检条目数与标志位，不达标直接让构建失败（0.2.5 补充）。
 - 打包内新增 `安装.bat`（同时提供 ASCII 名 `install.bat`）；启动器提示语与
   使用说明同步改成「先安装、再双击图标」。
 - 测试：新增 `tests/test_appcontrol.py`（10 条）与 `tests/ui/check-app-control.mjs`
-  （12 项断言，会真的把被测服务关掉再验证端口不再响应），全量 **126 passed**。
+  （12 项断言，会真的把被测服务关掉再验证端口不再响应），全量 **134 passed**。
   CI 的测试步骤从单文件改成 `pytest tests -q`，新用例一并纳入出包门槛。
 
 ### 0.2.3

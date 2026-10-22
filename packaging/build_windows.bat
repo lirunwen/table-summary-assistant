@@ -105,11 +105,13 @@ if exist "LICENSE" copy /Y "LICENSE" "%STAGE%\LICENSE.txt" >nul
 if exist "samples" xcopy "samples" "%STAGE%\samples\" /E /I /Y >nul
 
 set ZIP=dist\TableSummaryAssistant-v%APPVER%-windows-x64.zip
-rem 优先用系统自带的 bsdtar（Win10 1803+），对中文路径更稳
-tar -a -c -f "%ZIP%" -C "dist\stage" "表格汇总助手"
+rem 压缩交给 make_zip.py：tar.exe 的命令行参数要过 ANSI 代码页，中文目录名可能
+rem 被替换成问号；Compress-Archive 又不写 UTF-8 标志位。脚本会自检并失败退出。
+python packaging\make_zip.py --src "dist\stage" --out "%ZIP%" --expect-min 500
 if errorlevel 1 (
-  echo       改用 PowerShell 压缩 ...
-  powershell -NoProfile -Command "Compress-Archive -Path 'dist\stage\表格汇总助手' -DestinationPath '%ZIP%' -Force"
+  echo [错误] 压缩失败，见上方 make_zip.py 输出。
+  pause
+  exit /b 1
 )
 if not exist "%ZIP%" (
   echo [错误] 压缩失败。

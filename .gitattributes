@@ -1,0 +1,28 @@
+# 换行符统一策略
+#
+# .bat / .cmd 必须是 CRLF：cmd.exe 对纯 LF 的批处理解析不稳，尤其是
+# `goto :label` 这种跳转（install.bat 里就有）。仓库里存 LF、检出时转 CRLF，
+# 这样 macOS 上编辑不会产生满屏 diff，Windows 上跑起来又没问题。
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# Windows 上 Python / JS / Markdown 也用 CRLF 检出更自然，避免记事本里挤成一行
+*.py    text eol=lf
+*.js    text eol=lf
+*.mjs   text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.spec  text eol=lf
+
+# 二进制，别做任何换行转换
+*.png   binary
+*.ico   binary
+*.zip   binary
+*.exe   binary
+*.xlsx  binary
+*.xlsm  binary
+*.xls   binary
+*.docx  binary
