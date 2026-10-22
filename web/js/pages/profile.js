@@ -455,7 +455,12 @@ export default {
         html += `<option value="table:${attr(primary.table_id)}" selected>⚠ ${esc(tableLabel(primary.table_id))}（未参与）</option>`;
       }
       html += `<option value="const" ${mapping?.mode === 'const' ? 'selected' : ''}>固定值</option>`;
-      html += `<option value="blank" ${!primary?.table_id && mapping?.mode !== 'const' ? 'selected' : ''}>留空</option>`;
+      // 公式列在来源下拉里要能看出来「这一列不是取数算的」，否则会被误认为留空
+      if (mapping?.formula_on === true && mapping?.mode !== 'const') {
+        html += `<option value="blank" selected>由公式计算（不使用来源）</option>`;
+      } else {
+        html += `<option value="blank" ${!primary?.table_id && mapping?.mode !== 'const' ? 'selected' : ''}>留空</option>`;
+      }
       return html;
     }
 
@@ -1340,10 +1345,12 @@ export default {
           const value = select.value;
           const old = config.mappings[key] || {};
           const chain = sourcesOf(old);
+          // 从「公式计算」改成具体来源时，把公式关掉（公式正文保留，随时能再打开）
+          const formulaOff = old.formula_on === true;
           if (value === 'const') {
             config.mappings[key] = { mode: 'const', value: old.value || '' };
           } else if (value === 'blank' || value === '') {
-            config.mappings[key] = { mode: 'blank' };
+            config.mappings[key] = { mode: 'blank', formula_on: false, formula: old.formula || '' };
           } else if (value.startsWith('table:')) {
             const tableId = value.slice(6);
             const headers = tableHeaders(tableId);
@@ -1356,6 +1363,7 @@ export default {
             config.mappings[key] = {
               ...old,
               mode: 'table',
+              formula_on: false,
               sources: [{ table_id: tableId, column_index: index, column_name: headers[index] || '', transform: old.transform || 'direct' }, ...rest],
               combine: combineOf(old),
               separator: old.separator || '、',
@@ -1366,6 +1374,9 @@ export default {
             delete config.mappings[key].column_index;
             delete config.mappings[key].matched_alias;
             if (guess < 0) fillByAlias(key, col.name, tableId, headers);
+          }
+          if (formulaOff) {
+            toast('这一列已改为按来源取数，原公式还留着，点 ƒx 可以再启用。', 'info');
           }
           markDirty(true);
         });
