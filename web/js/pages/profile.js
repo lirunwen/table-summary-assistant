@@ -134,6 +134,12 @@ export default {
     let saveStatus = 'saved';
     let lastSaved = profile.updated_at;
     let running = false;
+    // 「目标列详情」默认收起：目标表一大屏就是几十行，真正要改的往往只有一两列。
+    // 这两个状态只活在当前会话，不写进配置。
+    let targetDetailOpen = false;
+    let activeStep = 'source';
+    // 自动预匹配的「触发指纹」：数据源或目标列变了才重跑，避免每次重绘都改写用户的选择
+    let autoMapSig = '';
 
     ctx.setCrumb([
       { label: '工作台', href: '#/' },
@@ -300,8 +306,11 @@ export default {
      * 规则（严格同名 → 括号备注名）统一由后端 `backend/column_match.py` 实现，
      * 前端只负责收集「还没配置的列」和「参与匹配的表」（数组顺序即优先级），
      * 不在这里再写一套，避免两边规则慢慢跑偏。
+     *
+     * `auto` 为真表示这是「自动预匹配」：命中的列会打上 `auto_matched` 标记，
+     * 界面上显示成「自动 · 同名 / 备注名」，用户手动改过就清掉标记。
      */
-    async function autoMap({ silent = false } = {}) {
+    async function autoMap({ silent = false, auto = false } = {}) {
       const entries = activeEntries();
       if (!entries.length) {
         if (!silent) toast('先选择主表或要合并的数据表，再来匹配字段。', 'warn');
@@ -313,6 +322,9 @@ export default {
         if (existing && existing.mode === 'const') continue;
         // 已经用公式算出来的列不参与自动匹配，否则会把公式覆盖掉
         if (existing && existing.formula_on === true) continue;
+        // 用户明确选过「留空」的列不再被**自动**匹配覆盖；
+        // 但手动点「按列名匹配」是明确要求，就该把它填上（auto=false 时不跳过）
+        if (auto && existing && existing.user_blank === true) continue;
         // 已经有可用来源链的列不动它（半截坏掉的除外，那种正好借这次匹配修好）
         const sources = sourcesOf(existing);
         const intact = sources.length && sources.every((src) => {
@@ -359,12 +371,17 @@ export default {
         delete mapping.table_id;
         delete mapping.column_index;
         delete mapping.matched_alias;
+        delete mapping.user_blank;
         if (hit.via === 'alias') {
           // 记下是靠哪个括号备注名命中的，映射行里会显示出来，方便核对
           mapping.matched_alias = hit.alias || '';
           byAlias += 1;
         } else {
           byName += 1;
+        }
+        if (auto) {
+          mapping.auto_matched = true;
+          mapping.matched_via = hit.via === 'alias' ? 'alias' : 'exact';
         }
         config.mappings[hit.key] = mapping;
       }
@@ -380,6 +397,53 @@ export default {
         }
       }
       return count;
+    }
+
+    /**
+     * 自动预匹配的触发指纹：数据源（主表/主键/关联表/纵向表）或目标列一变就变。
+     * 只有指纹变了才重跑一次匹配——否则每次重绘都会去动用户的选择。
+     */
+    function autoMapSignature() {
+      const sources = activeIds().slice().sort();
+      const keys = (config.primary_keys || []).join(',');
+      const cols = (config.target.columns || []).map((c) => `${c.key}:${c.name}`).join('|');
+      return `${config.mode}#${sources.join(',')}#${keys}#${cols}`;
+    }
+
+    /**
+     * 选完数据源（或换了模板）后自动预匹配。
+     * 只填空着的列，不覆盖已有来源；匹配结果在「字段映射」里带「自动」标识。
+     */
+    async function maybeAutoMap({ reason = '' } = {}) {
+      const sig = autoMapSignature();
+      if (sig === autoMapSig) return 0;
+      autoMapSig = sig;
+      if (!activeIds().length) return 0;
+      const count = await autoMap({ silent: true, auto: true });
+      if (count) {
+        markDirty(true);
+        if (reason) toast(`${reason}已按列名自动匹配 ${count} 列，可在「字段映射」里逐列核对。`, 'ok', 4200);
+      }
+      return count;
+    }
+
+    /**
+     * 候选来源：没匹配上的目标列给出候选下拉。
+     * 候选 = 当前参与汇总的表的所有列，按「同名 → 括号备注名 → 其余」排，
+     * 这样即使严格规则没命中，也能一眼看出该选哪一列。
+     */
+    function candidateOptions(col) {
+      const entries = activeEntries();
+      if (!entries.length) return '';
+      const groups = entries.map((entry) => {
+        const opts = (entry.table.headers || []).map((header, index) => {
+          const mark = header === col.name ? ' ✓同名'
+            : /[（(【〔［[]/.test(col.name) && col.name.includes(header) ? ' ✓备注名' : '';
+          return `<option value="${attr(`${entry.table.id}|${index}`)}">${esc(header)}${mark}</option>`;
+        }).join('');
+        return opts ? `<optgroup label="${attr(entry.label)}">${opts}</optgroup>` : '';
+      }).filter(Boolean).join('');
+      return groups;
     }
 
     /** 手选来源表后同名没命中时，再问一次后端要不要用括号备注名。失败就保持第一列。 */
@@ -484,12 +548,13 @@ export default {
       const tablesExist = availableTables().length > 0;
       const pHeaders = primaryHeaders();
       return `
-        <section class="section-card" id="section-sources">
-          <div class="section-head">
-            <span class="section-num">3</span>
+        <section class="section-card ${activeStep === 'source' ? 'step-active' : ''}" id="section-sources" data-step="source">
+          <div class="section-head" data-step-head="source">
+            <span class="section-num">1</span>
             <div class="section-head-main">
               <h3>数据来源</h3>
-              <p>决定每一行从哪里来、一共多少行。关联模式先选主表，再用主键把其他表补进来；模板只决定输出的长相，不带数据。</p>
+              <p>决定每一行从哪里来、一共多少行。关联模式先选主表，再用主键把其他表补进来；
+                选好后会按列名自动给目标列预匹配来源。</p>
             </div>
             ${!tablesExist ? `<a class="btn btn-secondary btn-sm" href="#/sources">${icon('upload-cloud')}去接入文件</a>` : ''}
           </div>
@@ -664,9 +729,9 @@ export default {
       const included = cols.filter((c) => c.included !== false);
       const isTemplate = config.target.kind === 'template';
       return `
-        <section class="section-card" id="section-target">
-          <div class="section-head">
-            <span class="section-num">1</span>
+        <section class="section-card ${activeStep === 'target' ? 'step-active' : ''}" id="section-target" data-step="target">
+          <div class="section-head" data-step-head="target">
+            <span class="section-num">2</span>
             <div class="section-head-main">
               <h3>目标表</h3>
               <p>${isTemplate
@@ -710,20 +775,51 @@ export default {
           <div class="flex items-center justify-between gap-10 mb-10 flex-wrap">
             <div>
               <span class="field-label" style="margin:0">目标列 <span class="faint" style="font-weight:400">已纳入 ${included.length} / ${cols.length} 列</span></span>
-              <div class="tiny faint mt-4">${config.target.kind === 'template' ? '取消勾选可保留模板中的公式列或人工填写列。' : '每一列都会成为输出表的一列。'}</div>
+              <div class="tiny faint mt-4">${config.target.kind === 'template'
+                ? '取消勾选可保留模板中的公式列或人工填写列。'
+                : '每一列都会成为输出表的一列。'}</div>
             </div>
             <div class="flex gap-6">
               ${config.target.kind === 'template' || !cols.length ? '' : `<button class="btn btn-secondary btn-sm" type="button" data-import-columns>${icon('table')}从数据表导入</button>`}
               ${config.target.kind === 'template' ? '' : `<button class="btn btn-soft btn-sm" type="button" data-add-column>${icon('plus')}添加列</button>`}
+              <button class="btn btn-secondary btn-sm" type="button" data-toggle-col-detail aria-expanded="${targetDetailOpen}">
+                ${icon(targetDetailOpen ? 'arrow-up' : 'arrow-down')}${targetDetailOpen ? '收起目标列详情' : '目标列详情'}
+              </button>
             </div>
           </div>
-          ${cols.length ? renderColumnList(cols) : `<div class="empty-inline" style="padding:24px">
-            还没有目标列。${config.target.kind === 'template' ? '模板中没有识别到表头，请调整表头行或更换模板。' : '可以从数据表导入列名，也可以手动添加。'}
-            <div class="mt-10">${config.target.kind === 'template'
-              ? `<button class="btn btn-primary btn-sm" type="button" data-change-template>${icon('refresh')}重新选择模板</button>`
-              : `<button class="btn btn-primary btn-sm" type="button" data-import-columns>${icon('table')}从数据表导入列</button>`}</div>
-          </div>`}
+          ${targetDetailOpen
+            ? (cols.length ? renderColumnList(cols) : `<div class="empty-inline" style="padding:24px">
+                还没有目标列。${config.target.kind === 'template' ? '模板中没有识别到表头，请调整表头行或更换模板。' : '可以从数据表导入列名，也可以手动添加。'}
+                <div class="mt-10">${config.target.kind === 'template'
+                  ? `<button class="btn btn-primary btn-sm" type="button" data-change-template>${icon('refresh')}重新选择模板</button>`
+                  : `<button class="btn btn-primary btn-sm" type="button" data-import-columns>${icon('table')}从数据表导入列</button>`}</div>
+              </div>`)
+            : renderColumnSummary(cols, included, isTemplate)}
         </section>`;
+    }
+
+    /** 收起时的目标列概要：只报数，不列明细——列多的时候一屏看不完。 */
+    function renderColumnSummary(cols, included, isTemplate) {
+      if (!cols.length) {
+        return `<div class="empty-inline" style="padding:18px">
+          还没有目标列。${isTemplate ? '模板中没有识别到表头，请调整表头行或更换模板。' : '可以从数据表导入列名，也可以手动添加。'}
+          <div class="mt-10">${isTemplate
+            ? `<button class="btn btn-primary btn-sm" type="button" data-change-template>${icon('refresh')}重新选择模板</button>`
+            : `<button class="btn btn-primary btn-sm" type="button" data-import-columns>${icon('table')}从数据表导入列</button>`}</div>
+        </div>`;
+      }
+      const required = cols.filter((c) => c.required).length;
+      const excluded = cols.length - included.length;
+      const names = cols.slice(0, 8).map((c) => esc(c.name)).join('、');
+      return `<div class="col-summary">
+        <div class="col-summary-stats">
+          <span class="chip chip-plain">${icon('columns')}${cols.length} 列</span>
+          <span class="chip chip-brand">纳入 ${included.length}</span>
+          ${excluded ? `<span class="chip">保持原样 ${excluded}</span>` : ''}
+          ${required ? `<span class="chip chip-gold">必填 ${required}</span>` : ''}
+        </div>
+        <div class="tiny faint mt-6">${names}${cols.length > 8 ? ` 等 ${cols.length} 列` : ''}。要改名、勾选或改类型，点右上角「目标列详情」。</div>
+      </div>`;
     }
 
     // 没用模板时，用一个明确的行动区替代原来藏在标题右侧的小按钮：
@@ -836,12 +932,13 @@ export default {
         return sourcesOf(config.mappings[c.key]).length && combine !== 'first';
       }).length;
       return `
-        <section class="section-card" id="section-mapping">
-          <div class="section-head">
-            <span class="section-num">2</span>
+        <section class="section-card ${activeStep === 'mapping' ? 'step-active' : ''}" id="section-mapping" data-step="mapping">
+          <div class="section-head" data-step-head="mapping">
+            <span class="section-num">3</span>
             <div class="section-head-main">
               <h3>字段映射</h3>
-              <p>每个目标列从哪来、多行怎么合并，在这里定。按列名自动匹配、逐列手选，或点 ƒx 用公式算。</p>
+              <p>每个目标列从哪来、多行怎么合并，在这里定。选好数据源后已按列名自动预匹配，
+                下面可以逐列调整，也可以点 ƒx 用公式算。</p>
             </div>
             <div class="section-head-actions">
               ${formulaCount ? `<span class="chip chip-brand">${formulaCount} 列用公式</span>` : ''}
@@ -956,6 +1053,13 @@ export default {
         </div>`;
     }
 
+    /** 自动匹配标识：让用户一眼看出哪些列是机器配的、哪些是自己改的。 */
+    function autoBadge(mapping) {
+      if (!mapping?.auto_matched) return '';
+      const via = mapping.matched_via === 'alias' ? '备注名' : '同名';
+      return `<span class="map-auto" title="按列名自动匹配到（${via}），手动改过就会消失">${icon('wand', 'icon-sm')}自动 · ${via}</span>`;
+    }
+
     function renderMappingRow(col, entries) {
       const mapping = config.mappings[col.key];
       const sources = sourcesOf(mapping);
@@ -967,11 +1071,13 @@ export default {
       const showDateFormat = !useFormula && sources.length > 0 && transform === 'date';
       const statusOff = !useFormula && !sources.length && mode !== 'const';
       const hasTable = sources.length > 0;
+      const candidates = !hasTable && mode !== 'const' && !useFormula ? candidateOptions(col) : '';
       return `
         <div class="map-row ${(statusOff || invalid) ? 'needs-attention' : ''}" data-map-row="${attr(col.key)}">
           <div class="map-target">
             <span class="name" title="${attr(col.name)}">${esc(col.name)}</span>
             <span class="type">${typeName(col.type)}</span>
+            ${autoBadge(mapping)}
           </div>
           <select class="select select-sm" data-map-source="${attr(col.key)}">
             ${mappingSourceOptions(col, mapping)}
@@ -990,7 +1096,11 @@ export default {
                    ${aliasHint(mapping)}`
                 : mode === 'const'
                   ? `<input class="input input-sm" value="${attr(mapping?.value || '')}" data-map-const="${attr(col.key)}" placeholder="固定内容">`
-                  : `<span class="tiny faint">该列输出为空</span>`}
+                  : candidates
+                    ? `<select class="select select-sm" data-map-candidate="${attr(col.key)}" title="没匹配上，从候选来源列里挑一个">
+                         <option value="">没匹配上，从候选里选…</option>${candidates}
+                       </select>`
+                    : `<span class="tiny faint">该列输出为空</span>`}
           </div>
           <div class="map-transform">
             <select class="select select-sm" data-map-transform="${attr(col.key)}" ${!hasTable || useFormula ? 'disabled' : ''}>
@@ -1093,15 +1203,18 @@ export default {
         </div>
         <div class="editor-layout">
           <div class="stack">
+            ${renderSourceSection()}
             ${renderTargetSection()}
             ${renderMappingSection()}
-            ${renderSourceSection()}
             <div class="tiny faint" style="padding:2px 4px">配置会自动保存。所有计算都在本机完成，关闭启动窗口即停止服务。</div>
           </div>
           ${renderRail()}
         </div>`;
       if (preserveScroll) window.scrollTo(0, scrollY);
       bind();
+      // 打开已有方案、或数据源刚变化时，按列名自动预匹配一次空着的列。
+      // 指纹没变就立刻返回，不会反复改写用户的选择。
+      maybeAutoMap();
     }
 
     function bind() {
@@ -1149,6 +1262,24 @@ export default {
       view.querySelectorAll('[data-preview]').forEach((btn) => btn.addEventListener('click', () => handlePreview(btn)));
       view.querySelectorAll('[data-run]').forEach((btn) => btn.addEventListener('click', () => handleRun(btn)));
 
+      // 步骤切换：点段落标题即切到那一步；离开「目标表」时目标列详情复位收起
+      view.querySelectorAll('[data-step-head]').forEach((head) => {
+        head.addEventListener('click', (event) => {
+          if (event.target.closest('button, a, select, input')) return;
+          const step = head.dataset.stepHead;
+          if (step === activeStep) return;
+          activeStep = step;
+          if (step !== 'target') targetDetailOpen = false;
+          paint(true);
+        });
+      });
+
+      // 目标列详情：默认收起，点开才展开明细
+      view.querySelector('[data-toggle-col-detail]')?.addEventListener('click', () => {
+        targetDetailOpen = !targetDetailOpen;
+        paint(true);
+      });
+
       // 模式
       view.querySelectorAll('[data-mode]').forEach((el) => {
         el.addEventListener('click', () => {
@@ -1169,6 +1300,7 @@ export default {
         config.lookups = (config.lookups || []).filter((l) => l.table_id !== config.primary_table);
         syncLookupKeys();
         markDirty(true);
+        maybeAutoMap({ reason: '选定主表后，' });
       });
       view.querySelectorAll('[data-key-index]').forEach((btn) => {
         btn.addEventListener('click', () => togglePrimaryKey(Number(btn.dataset.keyIndex)));
@@ -1181,6 +1313,7 @@ export default {
           keys: Array(config.primary_keys.length).fill(null),
         }];
         markDirty(true);
+        maybeAutoMap({ reason: '添加关联表后，' });
       });
       view.querySelectorAll('[data-lookup-table]').forEach((select) => {
         select.addEventListener('change', (e) => {
@@ -1190,6 +1323,7 @@ export default {
           lookup.table_id = e.target.value;
           lookup.keys = Array(config.primary_keys.length).fill(null);
           markDirty(true);
+          maybeAutoMap({ reason: '换关联表后，' });
         });
       });
       view.querySelectorAll('[data-lookup-key]').forEach((select) => {
@@ -1208,6 +1342,7 @@ export default {
         btn.addEventListener('click', () => {
           config.lookups.splice(Number(btn.dataset.removeLookup), 1);
           markDirty(true);
+          maybeAutoMap({ reason: '移除关联表后，' });
         });
       });
 
@@ -1216,11 +1351,13 @@ export default {
         if (!e.target.value) return;
         config.append_tables = [...config.append_tables, e.target.value];
         markDirty(true);
+        maybeAutoMap({ reason: '添加数据表后，' });
       });
       view.querySelectorAll('[data-remove-append]').forEach((btn) => {
         btn.addEventListener('click', () => {
           config.append_tables.splice(Number(btn.dataset.removeAppend), 1);
           markDirty(true);
+          maybeAutoMap({ reason: '移除数据表后，' });
         });
       });
       view.querySelectorAll('[data-append-move]').forEach((btn) => {
@@ -1330,6 +1467,35 @@ export default {
           btn.disabled = false;
         }
       });
+      // 没匹配上的列：从候选下拉里挑一个来源列
+      view.querySelectorAll('[data-map-candidate]').forEach((select) => {
+        select.addEventListener('change', () => {
+          const key = select.dataset.mapCandidate;
+          const value = select.value;
+          if (!value) return;
+          const [tableId, rawIndex] = value.split('|');
+          const index = Number(rawIndex);
+          const headers = tableHeaders(tableId);
+          const old = config.mappings[key] || {};
+          config.mappings[key] = {
+            ...old,
+            mode: 'table',
+            auto_matched: false,
+            sources: [{
+              table_id: tableId,
+              column_index: index,
+              column_name: headers[index] || '',
+              transform: old.transform || 'direct',
+            }],
+            combine: combineOf(old),
+            separator: old.separator || '、',
+            order_by: old.order_by || null,
+            fallback: old.fallback || '',
+          };
+          delete config.mappings[key].user_blank;
+          markDirty(true);
+        });
+      });
       // 映射列表为空时给一个跳到「数据来源」的入口，别让人卡在这一段
       view.querySelectorAll('[data-goto-sources]').forEach((btn) => btn.addEventListener('click', () => {
         document.getElementById('section-sources')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1350,7 +1516,8 @@ export default {
           if (value === 'const') {
             config.mappings[key] = { mode: 'const', value: old.value || '' };
           } else if (value === 'blank' || value === '') {
-            config.mappings[key] = { mode: 'blank', formula_on: false, formula: old.formula || '' };
+            // 明确留空的列不再被自动匹配覆盖
+            config.mappings[key] = { mode: 'blank', user_blank: true, formula: old.formula || '' };
           } else if (value.startsWith('table:')) {
             const tableId = value.slice(6);
             const headers = tableHeaders(tableId);
@@ -1364,6 +1531,8 @@ export default {
               ...old,
               mode: 'table',
               formula_on: false,
+              // 手动改过就不再算「自动匹配」，标识会消失
+              auto_matched: false,
               sources: [{ table_id: tableId, column_index: index, column_name: headers[index] || '', transform: old.transform || 'direct' }, ...rest],
               combine: combineOf(old),
               separator: old.separator || '、',
@@ -1373,6 +1542,7 @@ export default {
             delete config.mappings[key].table_id;
             delete config.mappings[key].column_index;
             delete config.mappings[key].matched_alias;
+            delete config.mappings[key].user_blank;
             if (guess < 0) fillByAlias(key, col.name, tableId, headers);
           }
           if (formulaOff) {
@@ -1392,10 +1562,13 @@ export default {
           chain[0].column_index = index;
           chain[0].column_name = headers[index] || '';
           mapping.sources = chain;
-          // 用户手选了字段，「靠括号备注名命中」的标记就不成立了，重绘一次把提示收掉
+          // 用户手选了字段，「靠括号备注名命中」和「自动匹配」的标记都不再成立
           const hadAlias = !!mapping.matched_alias;
+          const hadAuto = mapping.auto_matched === true;
           delete mapping.matched_alias;
-          markDirty(hadAlias);
+          mapping.auto_matched = false;
+          delete mapping.matched_via;
+          markDirty(hadAlias || hadAuto);
           paintSaveStatus();
         });
       });
@@ -1408,8 +1581,12 @@ export default {
           const wasDate = chain[0].transform === 'date';
           chain[0].transform = select.value;
           mapping.sources = chain;
+          // 手动改过处理方式就不再算「自动匹配」
+          const hadAuto = mapping.auto_matched === true;
+          mapping.auto_matched = false;
+          delete mapping.matched_via;
           // 进出「统一为日期」都要重绘：进要出现格式下拉，出要收掉
-          markDirty(wasDate || select.value === 'date');
+          markDirty(wasDate || select.value === 'date' || hadAuto);
         });
       });
       view.querySelectorAll('[data-map-combine]').forEach((select) => {
@@ -1417,6 +1594,10 @@ export default {
           const mapping = config.mappings[select.dataset.mapCombine];
           if (!mapping) return;
           mapping.combine = select.value;
+          // 手动定过合并方式就不再算「自动匹配」
+          const hadAuto = mapping.auto_matched === true;
+          mapping.auto_matched = false;
+          delete mapping.matched_via;
           // 换成「取最新一条」时要出现排序列下拉，其他方式收掉
           markDirty(true);
         });
@@ -1582,15 +1763,18 @@ export default {
               </div>`).join('')}
           </div>`;
         body.querySelector('[data-back]').addEventListener('click', renderLibrary);
-        body.querySelectorAll('[data-pick-sheet]').forEach((btn) => {
-          btn.addEventListener('click', () => {
-            const sheet = sheets.find((s) => s.name === btn.dataset.pickSheet);
-            if (!sheet) return;
-            applyTemplateToTarget(config, template, sheet);
-            autoMap({ silent: true }).then(() => markDirty(true));
-            ref.close();
-            toast(`已应用模板「${template.name}」的工作表「${sheet.name}」。`, 'ok');
-          });
+          body.querySelectorAll('[data-pick-sheet]').forEach((btn) => {
+            btn.addEventListener('click', () => {
+              const sheet = sheets.find((s) => s.name === btn.dataset.pickSheet);
+              if (!sheet) return;
+              applyTemplateToTarget(config, template, sheet);
+              // 换了模板目标列就变了：详情复位收起，再按新列名预匹配一次
+              targetDetailOpen = false;
+              autoMapSig = '';
+              maybeAutoMap({ reason: '选好模板后，' }).then(() => markDirty(true));
+              ref.close();
+              toast(`已应用模板「${template.name}」的工作表「${sheet.name}」。`, 'ok');
+            });
         });
       }
 
@@ -1615,7 +1799,10 @@ export default {
         const sheet = (template.meta?.sheets || template.sheets || []).find((s) => s.name === config.target.sheet)
           || { name: config.target.sheet, header_row: config.target.header_row, headers: (template.fields || []).map((f) => f.name) };
         applyTemplateToTarget(config, template, sheet);
-        autoMap({ silent: true }).then(() => markDirty(true));
+        // 同步后目标列重建：详情复位收起，并按新列名预匹配
+        targetDetailOpen = false;
+        autoMapSig = '';
+        maybeAutoMap({ reason: '同步模板字段后，' }).then(() => markDirty(true));
         toast(`已按模板「${template.name}」同步 ${config.target.columns.length} 个目标列。`, 'ok');
       });
     }
@@ -1632,6 +1819,7 @@ export default {
         config.target.template_id = null;
         config.target.header_row = 1;
         for (const col of config.target.columns) col.template_col = null;
+        targetDetailOpen = false;
         markDirty(true);
         toast('已改为新建工作簿，列配置保留。', 'ok');
       });

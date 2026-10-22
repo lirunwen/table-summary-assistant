@@ -34,13 +34,27 @@ try {
   page.on('pageerror', (e) => jsErrors.push(String(e)));
   page.on('console', (m) => { if (m.type() === 'error') jsErrors.push(m.text()); });
 
+  // 先把三列标成「用户明确留空」：自动匹配会跳过它们，
+  // 这样才能验证手动点「按列名匹配」这条路径（用例可重复执行）。
+  const boot = await (await fetch(`${BASE}/api/bootstrap`)).json();
+  const prof = (boot.profiles || []).find((p) => p.id === ctx.profile_id);
+  if (prof) {
+    const blank = (key) => ({ mode: 'blank', user_blank: true });
+    const cfg = { ...prof.config, mappings: { k0: blank('k0'), k1: blank('k1'), k2: blank('k2') } };
+    await fetch(`${BASE}/api/profiles/${ctx.profile_id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: prof.name, config: cfg }),
+    });
+  }
+
   await page.goto(`${BASE}/#/profiles/${ctx.profile_id}`, { waitUntil: 'networkidle0' });
   await page.waitForSelector('[data-map-row="k1"]', { timeout: 15000 });
-  await wait(400);
+  await wait(1200);
 
-  // --- 1. 初始状态：三列都还没来源 ---
+  // --- 1. 初始状态：标了「明确留空」的列不会被自动匹配填上 ---
   const before = await page.$$eval('[data-map-field]', (els) => els.length);
-  check('初始没有可选的来源字段（3 列都空着）', before === 0, `实际 ${before} 个字段下拉`);
+  check('明确留空的列不会被自动匹配填上', before === 0, `实际 ${before} 个字段下拉`);
 
   // --- 2. 点「按列名匹配」 ---
   await page.click('[data-auto-map]');
@@ -88,7 +102,8 @@ try {
     const profile = (data.profiles || []).find((p) => p.id === pid);
     return profile?.config?.mappings || {};
   }, BASE, ctx.profile_id);
-  check('括号别名匹配结果已保存', saved.k1?.column_index === 1 && saved.k1?.column_name === '税前'
+  const k1src = (saved.k1?.sources || [])[0] || {};
+  check('括号别名匹配结果已保存', k1src.column_index === 1 && k1src.column_name === '税前'
     && saved.k1?.matched_alias === '税前', JSON.stringify(saved.k1 || {}));
 
   // --- 5. 手改来源字段后，别名提示要消失 ---

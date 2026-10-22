@@ -59,11 +59,11 @@ try {
     await wait(350);
   }
 
-  // --- 1. 段落顺序：目标模板 → 字段映射 → 数据来源 ---
+  // --- 1. 段落顺序：数据来源 → 目标表 → 字段映射 ---
   const order = await page.evaluate(() => [...document.querySelectorAll('.section-card')]
     .map((el) => ({ id: el.id, num: el.querySelector('.section-num')?.textContent.trim() })));
-  check('段落顺序为 目标表 → 字段映射 → 数据来源',
-    order.map((o) => o.id).join(',') === 'section-target,section-mapping,section-sources',
+  check('段落顺序为 数据来源 → 目标表 → 字段映射',
+    order.map((o) => o.id).join(',') === 'section-sources,section-target,section-mapping',
     JSON.stringify(order));
   check('段落编号为 1/2/3', order.map((o) => o.num).join('') === '123', JSON.stringify(order.map((o) => o.num)));
 
@@ -149,6 +149,9 @@ try {
   }
 
   // --- 8. F6 回归：取消勾选某列不应报「模板新增字段」 ---
+  // 目标列详情默认收起，先展开才拿得到勾选框
+  await page.click('[data-toggle-col-detail]');
+  await wait(600);
   await page.evaluate(() => {
     const box = document.querySelector('[data-col-included="c3"]');
     box.checked = false;

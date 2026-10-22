@@ -1459,6 +1459,33 @@ h2.section-title {
 .map-status.off { color: var(--line-strong); }
 .map-status .icon { width: 15px; height: 15px; }
 
+/* ---- 目标列详情：收起时的概要 + 当前步骤高亮 ---- */
+.col-summary {
+  padding: 12px 14px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+}
+.col-summary-stats { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.section-card.step-active { box-shadow: 0 0 0 1px var(--brand); }
+.section-card .section-head { cursor: pointer; }
+.section-card .section-head:hover .section-head-main h3 { color: var(--brand); }
+
+/* ---- 字段映射：自动匹配标识 ---- */
+.map-auto {
+  display: inline-flex; align-items: center; gap: 3px;
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--brand-tint);
+  color: var(--brand);
+  font-size: 9px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.map-auto .icon { width: 9px; height: 9px; }
+.map-field select[data-map-candidate] { border-color: var(--gold); background: #fffdf6; }
+
 /* ---- 字段映射：行内「取值方式」条（合并方式 + 多来源 + 排序列） ---- */
 .map-chain {
   display: grid;
