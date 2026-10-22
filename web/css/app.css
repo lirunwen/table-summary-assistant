@@ -1430,11 +1430,12 @@ h2.section-title {
 .map-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 13px; flex-wrap: wrap; }
 .map-legend { display: flex; align-items: center; gap: 10px; color: var(--faint); font-size: 10.5px; }
 .map-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; }
-.map-table { min-width: 840px; }
+.map-table { min-width: 720px; }
+/* 每个目标列只占一行：目标列 / 来源 / 取值 / 状态 / 操作 */
 .map-row {
   display: grid;
-  grid-template-columns: minmax(120px, 1fr) minmax(140px, 1.15fr) minmax(120px, 1fr) 118px minmax(82px, .7fr) 26px;
-  gap: 9px;
+  grid-template-columns: minmax(140px, 1.1fr) minmax(180px, 1.6fr) 128px minmax(96px, .8fr) 96px;
+  gap: 10px;
   align-items: center;
   padding: 9px 13px;
   border-bottom: 1px solid var(--line);
@@ -1451,13 +1452,59 @@ h2.section-title {
   letter-spacing: .04em;
 }
 .map-row.needs-attention { background: #fffdf8; }
-.map-target { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.map-target { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
 .map-target .name { font-size: 12px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.map-target .type { color: var(--faint); font-size: 9.5px; }
+.map-target .type { color: var(--faint); font-size: 9.5px; white-space: nowrap; }
 .map-status { display: grid; place-items: center; color: #36a078; }
 .map-status.warn { color: var(--gold); }
 .map-status.off { color: var(--line-strong); }
 .map-status .icon { width: 15px; height: 15px; }
+
+/* 来源摘要 + 取值方式 + 状态标签 + 操作按钮 */
+.map-source { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.map-source .src-text {
+  font-size: 11.5px; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.map-source .src-text.off { color: var(--faint); }
+.map-chip {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--brand-tint);
+  color: var(--brand);
+  font-size: 9.5px;
+  font-weight: 600;
+}
+.map-status-cell { display: flex; align-items: center; }
+.map-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #f1f4f3;
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.map-badge .icon { width: 10px; height: 10px; }
+.map-badge.auto { background: var(--brand-tint); color: var(--brand); }
+.map-badge.manual { background: #eef2f1; color: var(--faint); }
+.map-badge.off { background: var(--gold-tint); color: var(--gold); }
+.map-badge.fx { background: #eef0fb; color: #4a5aa8; }
+.map-actions { display: flex; align-items: center; gap: 4px; justify-content: flex-end; }
+.map-actions .icon-btn { width: 26px; height: 26px; }
+.map-hint {
+  display: flex; align-items: flex-start; gap: 7px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.map-hint .icon { width: 13px; height: 13px; flex: none; margin-top: 3px; color: var(--brand); }
 
 /* ---- 目标列详情：收起时的概要 + 当前步骤高亮 ---- */
 .col-summary {
@@ -1470,21 +1517,6 @@ h2.section-title {
 .section-card.step-active { box-shadow: 0 0 0 1px var(--brand); }
 .section-card .section-head { cursor: pointer; }
 .section-card .section-head:hover .section-head-main h3 { color: var(--brand); }
-
-/* ---- 字段映射：自动匹配标识 ---- */
-.map-auto {
-  display: inline-flex; align-items: center; gap: 3px;
-  flex: none;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: var(--brand-tint);
-  color: var(--brand);
-  font-size: 9px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-.map-auto .icon { width: 9px; height: 9px; }
-.map-field select[data-map-candidate] { border-color: var(--gold); background: #fffdf6; }
 
 /* ---- 字段映射：行内「取值方式」条（合并方式 + 多来源 + 排序列） ---- */
 .map-chain {
@@ -1572,17 +1604,7 @@ h2.section-title {
 .colstat-val { flex: 0 0 auto; color: var(--faint); font-variant-numeric: tabular-nums; }
 .colstat.bad .colstat-val { color: var(--red); }
 
-/* ---- 字段映射：公式入口与列级日期格式 ---- */
-.map-field { min-width: 0; }
-.field-with-fx { display: flex; align-items: center; gap: 5px; min-width: 0; }
-.field-with-fx .select { flex: 1 1 auto; min-width: 0; }
 /* 靠模板列名括号里的备注名命中时，在来源字段下方标一行，方便核对 */
-.map-alias {
-  display: flex; align-items: center; gap: 4px; margin-top: 3px;
-  color: #9a7b2f; font-size: 9.5px; line-height: 1.3;
-}
-.map-alias .icon { width: 10px; height: 10px; flex: 0 0 auto; }
-.map-alias span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fx-btn {
   flex: 0 0 auto;
   width: 27px;

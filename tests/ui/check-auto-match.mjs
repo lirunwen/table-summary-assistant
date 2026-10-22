@@ -86,73 +86,78 @@ try {
   check('切换步骤后目标列详情复位收起', afterStep.rows === 0 && afterStep.summary, JSON.stringify(afterStep));
 
   // ---------- ② 自动预匹配 ----------
-  const auto = await page.evaluate(() => {
-    const rows = [...document.querySelectorAll('[data-map-row]')].map((el) => {
-      const key = el.dataset.mapRow;
-      const field = document.querySelector(`[data-map-field="${key}"]`);
-      const source = document.querySelector(`[data-map-source="${key}"]`);
-      return {
-        key,
-        name: el.querySelector('.map-target .name')?.textContent.trim(),
-        field: field ? field.options[field.selectedIndex]?.textContent.trim() : null,
-        sourceTable: source ? source.options[source.selectedIndex]?.textContent.trim() : null,
-        badge: el.querySelector('.map-auto')?.textContent.trim() || '',
-        alias: el.querySelector('.map-alias')?.textContent.trim() || '',
-        candidate: !!document.querySelector(`[data-map-candidate="${key}"]`),
-      };
-    });
-    return rows;
-  });
+  const auto = await page.evaluate(() => [...document.querySelectorAll('[data-map-row]')].map((el) => ({
+    key: el.dataset.mapRow,
+    name: el.querySelector('.map-target .name')?.textContent.trim(),
+    source: el.querySelector('.src-text')?.textContent.trim() || '',
+    badge: el.querySelector('.map-badge')?.textContent.trim() || '',
+  })));
   const byKey = Object.fromEntries(auto.map((r) => [r.key, r]));
-  check('打开方案即自动匹配出 8 列', auto.filter((r) => r.field).length === 8,
-    auto.map((r) => `${r.name}=${r.field || '未匹配'}`).join(' | '));
-  check('工号严格同名匹配到人员信息表', /工号/.test(byKey.c0?.field || '') && /人员信息/.test(byKey.c0?.sourceTable || ''),
-    `${byKey.c0?.field} ← ${byKey.c0?.sourceTable}`);
-  check('加班小时匹配到考勤明细表', /加班小时/.test(byKey.c4?.field || '') && /考勤明细/.test(byKey.c4?.sourceTable || ''),
-    `${byKey.c4?.field} ← ${byKey.c4?.sourceTable}`);
-  check('月薪（税前）按备注名匹配到「税前」', /税前/.test(byKey.c3?.field || ''), byKey.c3?.field);
-  check('备注名命中时行上有说明', /税前/.test(byKey.c3?.alias || ''), byKey.c3?.alias);
-  check('自动匹配的行有「自动」标识', /自动/.test(byKey.c0?.badge || ''), byKey.c0?.badge);
+  check('打开方案即自动匹配出 8 列', auto.filter((r) => r.source && !/未配置/.test(r.source)).length === 8,
+    auto.map((r) => `${r.name}=${r.source || '未匹配'}`).join(' | '));
+  check('工号严格同名匹配到人员信息表', /工号/.test(byKey.c0?.source || '') && /人员信息/.test(byKey.c0?.source || ''),
+    byKey.c0?.source);
+  check('加班小时匹配到考勤明细表', /加班小时/.test(byKey.c4?.source || '') && /考勤明细/.test(byKey.c4?.source || ''),
+    byKey.c4?.source);
+  check('月薪（税前）按备注名匹配到「税前」', /税前/.test(byKey.c3?.source || ''), byKey.c3?.source);
+  check('自动匹配的行有「同名」标识', /同名/.test(byKey.c0?.badge || ''), byKey.c0?.badge);
   check('别名命中标识为「备注名」', /备注名/.test(byKey.c3?.badge || ''), byKey.c3?.badge);
-  check('没匹配上的列给出候选下拉', byKey.c8?.candidate === true, JSON.stringify(byKey.c8));
+  check('没匹配上的列显示未配置', /未配置/.test(byKey.c8?.badge || ''), byKey.c8?.badge);
 
-  // 候选下拉里能选出候选列
+  // 没匹配上的列：点「映射」能看到候选来源列
+  await page.click('[data-map-open="c8"]');
+  await page.waitForSelector('[data-mp-source]', { timeout: 10000 });
+  await wait(600);
+  const dialog = await page.evaluate(() => {
+    const sel = document.querySelector('[data-mp-source]');
+    const opts = [...sel.options].filter((o) => o.value);
+    return {
+      hint: document.querySelector('.map-hint')?.textContent.replace(/\s+/g, ' ').trim() || '',
+      count: opts.length,
+      sample: opts.slice(0, 3).map((o) => o.textContent.trim()),
+    };
+  });
+  check('映射弹层里列出了候选来源列', dialog.count > 0, JSON.stringify(dialog.sample));
+  check('弹层提示说明了没有同名命中', /没有能对上|候选/.test(dialog.hint || ''), dialog.hint);
+
+  // 从候选里选一列 → 映射生效，状态变「手动」
   const candidateValue = await page.evaluate(() => {
-    const sel = document.querySelector('[data-map-candidate="c8"]');
-    if (!sel) return null;
+    const sel = document.querySelector('[data-mp-source]');
     const opt = [...sel.options].find((o) => o.value);
     return opt ? opt.value : null;
   });
-  check('候选下拉里有可选来源列', !!candidateValue, String(candidateValue));
   if (candidateValue) {
-    await page.select('[data-map-candidate="c8"]', candidateValue);
+    await page.select('[data-mp-source]', candidateValue);
     await wait(800);
     const afterPick = await page.evaluate(() => {
-      const field = document.querySelector('[data-map-field="c8"]');
       const row = document.querySelector('[data-map-row="c8"]');
       return {
-        field: field ? field.options[field.selectedIndex]?.textContent.trim() : null,
-        candidate: !!document.querySelector('[data-map-candidate="c8"]'),
-        badge: row?.querySelector('.map-auto')?.textContent.trim() || '',
+        source: row?.querySelector('.src-text')?.textContent.trim() || '',
+        badge: row?.querySelector('.map-badge')?.textContent.trim() || '',
       };
     });
-    check('从候选里选一列后映射生效', !!afterPick.field, JSON.stringify(afterPick));
-    check('手动选的列不再标「自动」', afterPick.badge === '', afterPick.badge);
-    check('选完候选后候选下拉消失', afterPick.candidate === false, String(afterPick.candidate));
+    check('从候选里选一列后映射生效', !/未配置/.test(afterPick.source), JSON.stringify(afterPick));
+    check('手动选的列不再标「自动」', /手动/.test(afterPick.badge), afterPick.badge);
   }
+  await page.evaluate(() => (() => { const ms = document.querySelectorAll('.modal'); ms[ms.length - 1]?.querySelector('[data-close]')?.click(); })());
+  await wait(500);
 
   // 手动改一列 → 自动标识消失
+  await page.click('[data-map-open="c1"]');
+  await page.waitForSelector('[data-mp-source]', { timeout: 10000 });
+  await wait(500);
   await page.evaluate(() => {
-    const sel = document.querySelector('[data-map-field="c1"]');
-    if (!sel) return;
+    const sel = document.querySelector('[data-mp-source]');
     const opt = [...sel.options].find((o) => o.value && o.value !== sel.value);
     if (opt) { sel.value = opt.value; sel.dispatchEvent(new Event('change', { bubbles: true })); }
   });
   await wait(800);
+  await page.evaluate(() => (() => { const ms = document.querySelectorAll('.modal'); ms[ms.length - 1]?.querySelector('[data-close]')?.click(); })());
+  await wait(500);
   const afterManual = await page.evaluate(() => ({
-    badge: document.querySelector('[data-map-row="c1"] .map-auto')?.textContent.trim() || '',
+    badge: document.querySelector('[data-map-row="c1"] .map-badge')?.textContent.trim() || '',
   }));
-  check('手动改来源后「自动」标识消失', afterManual.badge === '', afterManual.badge);
+  check('手动改来源后「自动」标识变成「手动」', /手动/.test(afterManual.badge), afterManual.badge);
 
   // 收起状态下的目标列摘要仍然正确
   await page.evaluate(() => document.querySelector('[data-step-head="target"]')?.click());
@@ -172,7 +177,7 @@ try {
   const afterTemplate = await page.evaluate(() => ({
     rows: document.querySelectorAll('#section-target .col-row').length,
     summary: !!document.querySelector('#section-target .col-summary'),
-    mapped: [...document.querySelectorAll('[data-map-field]')].length,
+    mapped: [...document.querySelectorAll('[data-map-row]')].length,
   }));
   check('重新选择模板后目标列详情复位收起', afterTemplate.rows === 0 && afterTemplate.summary, JSON.stringify(afterTemplate));
   check('重新选择模板后自动预匹配重新跑过', afterTemplate.mapped > 0, `映射行 ${afterTemplate.mapped}`);

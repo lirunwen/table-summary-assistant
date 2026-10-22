@@ -294,9 +294,41 @@ export function combineOf(mapping) {
   return COMBINE_LABELS[key] ? key : 'first';
 }
 
-/** 把任意历史形态的映射整理成当前结构（mode 保留，兼容旧分支判断）。 */
+/**
+ * 匹配的来源说明（自动匹配命中的是同名、括号备注名，还是相似度兜底）。
+ * 只留这一个字段：以前拆成 auto_matched / matched_via / matched_alias 三个，
+ * 结果是「改一处要记得改另外两处」，容易出现"标识还在但其实已经手改过"。
+ */
+export function matchedOf(mapping) {
+  const m = mapping?.matched;
+  if (!m || !m.via) return null;
+  return { via: m.via, score: Number(m.score) || 0, alias: m.alias || '' };
+}
+
+export const MATCH_VIA_LABELS = {
+  exact: '同名',
+  alias: '备注名',
+  similar: '相似',
+};
+
+/**
+ * 把任意历史形态的映射整理成当前结构。
+ *
+ * 标准形状（存进 config 的就是它）：
+ *   {mode:'table'|'const'|'blank', sources:[...], combine, order_by,
+ *    transform(每条来源自带), fallback, date_format, formula_on, formula, matched}
+ *
+ * 「用户明确清空」与「还没配过」用**有没有这个键**区分：
+ * 没有键 = 没配过（自动匹配可以填）；`mode:'blank'` = 用户主动清空（自动匹配不再填）。
+ */
 export function normalizeMapping(raw) {
   const mapping = { ...(raw || {}) };
+  // 0.6.0 之前的三个中间状态（自动标记/匹配方式/备注名/用户留空）已被 `matched` 取代，
+  // 这里顺手清掉，老方案打开时自动就整理干净了。
+  delete mapping.auto_matched;
+  delete mapping.matched_via;
+  delete mapping.matched_alias;
+  delete mapping.user_blank;
   if (mapping.mode === 'const') {
     return { ...mapping, mode: 'const', value: mapping.value ?? '', sources: [] };
   }

@@ -5,8 +5,9 @@ import {
   openRunDetail, sourceTableOptions,
 } from '../components.js';
 import {
-  activeTableIds, allTables, combineOf, COMBINES, includedColumns, loadBootstrap,
-  normalizeConfig, sourcesOf, state, tableHeaders, tableLabel, templateById, templateDrift,
+  activeTableIds, allTables, combineOf, COMBINE_LABELS, COMBINES, includedColumns, loadBootstrap,
+  matchedOf, MATCH_VIA_LABELS, normalizeConfig, sourcesOf, state, tableHeaders, tableLabel,
+  templateById, templateDrift,
 } from '../store.js';
 import {
   attr, confirmDialog, emptyState, esc, fmtDate, fmtNumber,
@@ -140,6 +141,10 @@ export default {
     let activeStep = 'source';
     // 自动预匹配的「触发指纹」：数据源或目标列变了才重跑，避免每次重绘都改写用户的选择
     let autoMapSig = '';
+    // 没匹配上的目标列的候选来源列（内存里，不落配置），在「映射」弹层里用
+    let matchCandidates = {};
+    // 当前打开的「映射」弹层：同一时间只留一个，免得两层叠在一起点错
+    let mappingDialog = null;
 
     ctx.setCrumb([
       { label: '工作台', href: '#/' },
@@ -184,17 +189,14 @@ export default {
 
       let unmapped = 0;
       let invalid = 0;
-      const mappings = config.mappings || {};
       for (const col of cols) {
-        const m = mappings[col.key];
-        if (m && m.formula_on === true) continue;
-        if (m && m.mode === 'const') continue;
-        const sources = sourcesOf(m);
-        if (!sources.length) {
+        const state = mappingState(col.key);
+        if (state.formula || state.mapping?.mode === 'const') continue;
+        if (!state.sources.length) {
           unmapped += 1;
           continue;
         }
-        for (const src of sources) {
+        for (const src of state.sources) {
           const headers = tableHeaders(src.table_id);
           if (!headers.length) {
             errors.push(`列「${col.name}」的来源表已失效。`);
@@ -301,14 +303,56 @@ export default {
     }
 
     /**
+     * 一列当前的状态。统一从这里取，避免各处各写一套判断。
+     *
+     * `sources` 非空 = 已经配了来源；`mode==='blank'` = 用户明确清空；
+     * `formula_on` = 这一列用公式算。`matched` 记着自动匹配是怎么命中的。
+     */
+    function mappingState(key) {
+      const mapping = config.mappings[key] || null;
+      const sources = sourcesOf(mapping);
+      const formula = mapping?.formula_on === true;
+      return {
+        mapping,
+        sources,
+        formula,
+        cleared: !!mapping && mapping.mode === 'blank' && !sources.length && !formula,
+        configured: sources.length > 0,
+        matched: matchedOf(mapping),
+      };
+    }
+
+    /** 配好的来源是否还有效（表还在、列下标没越界）。 */
+    function sourceAlive(src) {
+      const headers = tableHeaders(src.table_id);
+      return headers.length > 0 && Number(src.column_index) < headers.length;
+    }
+
+    /** 写映射：只改给的字段，其余保留。 */
+    function setMapping(key, patch) {
+      const old = config.mappings[key] || {};
+      config.mappings[key] = { ...old, ...patch };
+    }
+
+    /** 清空一列：记成「用户明确留空」，自动匹配不再往里填。 */
+    function clearMapping(key) {
+      const old = config.mappings[key] || {};
+      config.mappings[key] = {
+        mode: 'blank',
+        formula: old.formula || '',
+        fallback: old.fallback || '',
+        date_format: old.date_format || '',
+      };
+    }
+
+    /**
      * 按列名匹配来源列。
      *
-     * 规则（严格同名 → 括号备注名）统一由后端 `backend/column_match.py` 实现，
-     * 前端只负责收集「还没配置的列」和「参与匹配的表」（数组顺序即优先级），
-     * 不在这里再写一套，避免两边规则慢慢跑偏。
+     * 规则（规范化精确 → 括号备注名 → 相似度）统一由后端 `backend/column_match.py`
+     * 实现，前端只负责「哪些列要匹配」与「结果怎么存」，不在这里再写一套。
      *
-     * `auto` 为真表示这是「自动预匹配」：命中的列会打上 `auto_matched` 标记，
-     * 界面上显示成「自动 · 同名 / 备注名」，用户手动改过就清掉标记。
+     * `auto` 为真表示这是自动预匹配：命中的列会记下 `matched`（怎么命中的），
+     * 界面上显示成「自动 · 同名 / 备注名 / 相似 91%」，用户手动改过就清掉。
      */
     async function autoMap({ silent = false, auto = false } = {}) {
       const entries = activeEntries();
@@ -318,20 +362,14 @@ export default {
       }
       const pending = [];
       for (const col of includedColumns(config)) {
-        const existing = config.mappings[col.key];
-        if (existing && existing.mode === 'const') continue;
-        // 已经用公式算出来的列不参与自动匹配，否则会把公式覆盖掉
-        if (existing && existing.formula_on === true) continue;
-        // 用户明确选过「留空」的列不再被**自动**匹配覆盖；
-        // 但手动点「按列名匹配」是明确要求，就该把它填上（auto=false 时不跳过）
-        if (auto && existing && existing.user_blank === true) continue;
-        // 已经有可用来源链的列不动它（半截坏掉的除外，那种正好借这次匹配修好）
-        const sources = sourcesOf(existing);
-        const intact = sources.length && sources.every((src) => {
-          const headers = tableHeaders(src.table_id);
-          return headers.length && Number(src.column_index) < headers.length;
-        });
-        if (intact) continue;
+        const state = mappingState(col.key);
+        if (state.formula) continue;                       // 公式列不参与匹配
+        if (state.mapping?.mode === 'const') continue;      // 固定值列不参与匹配
+        if (auto) {
+          // 自动预匹配：只填空位，不动已有来源，也不碰用户明确清空的列
+          if (state.cleared) continue;
+          if (state.configured && state.sources.every(sourceAlive)) continue;
+        }
         pending.push({ key: col.key, name: col.name });
       }
       if (!pending.length) {
@@ -348,52 +386,35 @@ export default {
         return 0;
       }
 
-      let byName = 0;
-      let byAlias = 0;
-      for (const hit of result.matches || []) {
+      const hits = result.matches || [];
+      for (const hit of hits) {
         if (!hit.table_id) continue;
-        const old = config.mappings[hit.key] || {};
-        const oldSources = sourcesOf(old);
-        const mapping = {
-          ...old,
+        const state = mappingState(hit.key);
+        setMapping(hit.key, {
           mode: 'table',
           sources: [{
             table_id: hit.table_id,
             column_index: hit.column_index,
             column_name: hit.column_name || '',
-            transform: oldSources[0]?.transform || old.transform || 'direct',
+            transform: state.sources[0]?.transform || 'direct',
           }],
-          combine: combineOf(old),
-          separator: old.separator || '、',
-          order_by: old.order_by || null,
-          fallback: old.fallback || '',
-        };
-        delete mapping.table_id;
-        delete mapping.column_index;
-        delete mapping.matched_alias;
-        delete mapping.user_blank;
-        if (hit.via === 'alias') {
-          // 记下是靠哪个括号备注名命中的，映射行里会显示出来，方便核对
-          mapping.matched_alias = hit.alias || '';
-          byAlias += 1;
-        } else {
-          byName += 1;
-        }
-        if (auto) {
-          mapping.auto_matched = true;
-          mapping.matched_via = hit.via === 'alias' ? 'alias' : 'exact';
-        }
-        config.mappings[hit.key] = mapping;
+          combine: combineOf(state.mapping),
+          matched: { via: hit.via, score: hit.score, alias: hit.alias || '' },
+        });
       }
+      // 没命中的列，把候选留到「映射」弹层里用
+      matchCandidates = result.candidates || {};
 
-      const count = byName + byAlias;
+      const count = hits.length;
       if (!silent) {
-        if (!count) toast('没有找到对得上的来源字段，可以手动选择。', 'info');
+        if (!count) toast('没有找到对得上的来源字段，可以在「映射」里从候选里挑。', 'info');
         else {
+          const stats = result.stats || {};
           const parts = [];
-          if (byName) parts.push(`同名 ${byName} 列`);
-          if (byAlias) parts.push(`括号备注名 ${byAlias} 列`);
-          toast(`已匹配 ${count} 列（${parts.join('，')}），已有配置保持不变。`, 'ok');
+          if (stats.by_name) parts.push(`同名 ${stats.by_name} 列`);
+          if (stats.by_alias) parts.push(`括号备注名 ${stats.by_alias} 列`);
+          if (stats.by_similar) parts.push(`相似 ${stats.by_similar} 列`);
+          toast(`已按列名匹配 ${count} 列（${parts.join('，') || '按列名'}），来源已更新。`, 'ok');
         }
       }
       return count;
@@ -425,45 +446,6 @@ export default {
         if (reason) toast(`${reason}已按列名自动匹配 ${count} 列，可在「字段映射」里逐列核对。`, 'ok', 4200);
       }
       return count;
-    }
-
-    /**
-     * 候选来源：没匹配上的目标列给出候选下拉。
-     * 候选 = 当前参与汇总的表的所有列，按「同名 → 括号备注名 → 其余」排，
-     * 这样即使严格规则没命中，也能一眼看出该选哪一列。
-     */
-    function candidateOptions(col) {
-      const entries = activeEntries();
-      if (!entries.length) return '';
-      const groups = entries.map((entry) => {
-        const opts = (entry.table.headers || []).map((header, index) => {
-          const mark = header === col.name ? ' ✓同名'
-            : /[（(【〔［[]/.test(col.name) && col.name.includes(header) ? ' ✓备注名' : '';
-          return `<option value="${attr(`${entry.table.id}|${index}`)}">${esc(header)}${mark}</option>`;
-        }).join('');
-        return opts ? `<optgroup label="${attr(entry.label)}">${opts}</optgroup>` : '';
-      }).filter(Boolean).join('');
-      return groups;
-    }
-
-    /** 手选来源表后同名没命中时，再问一次后端要不要用括号备注名。失败就保持第一列。 */
-    function fillByAlias(key, columnName, tableId, headers) {
-      api.matchColumns([{ key, name: columnName }], [{ id: tableId, headers }])
-        .then((res) => {
-          const hit = (res.matches || [])[0];
-          const current = config.mappings[key];
-          // 等待期间用户可能换了来源表或手选了字段，这几种情况都不该覆盖
-          if (!hit || hit.via !== 'alias' || !current) return;
-          const chain = sourcesOf(current);
-          if (!chain.length || chain[0].table_id !== tableId) return;
-          if (Number(chain[0].column_index) !== 0) return;
-          chain[0].column_index = hit.column_index;
-          chain[0].column_name = hit.column_name || '';
-          current.sources = chain;
-          current.matched_alias = hit.alias || '';
-          markDirty(true);
-        })
-        .catch(() => { /* 猜不出来就留着第一列，用户手选即可 */ });
     }
 
     function syncLookupKeys() {
@@ -507,34 +489,34 @@ export default {
         </optgroup>`).join('');
     }
 
-    function mappingSourceOptions(col, mapping) {
-      const active = activeIdSet();
-      const entries = availableTables().filter((entry) => active.has(entry.table.id));
-      const primary = sourcesOf(mapping)[0];
-      let html = `<option value="">选择来源…</option>`;
-      for (const entry of entries) {
-        html += `<option value="table:${attr(entry.table.id)}" ${primary?.table_id === entry.table.id ? 'selected' : ''}>${esc(entry.label)}</option>`;
-      }
-      if (primary?.table_id && !active.has(primary.table_id)) {
-        html += `<option value="table:${attr(primary.table_id)}" selected>⚠ ${esc(tableLabel(primary.table_id))}（未参与）</option>`;
-      }
-      html += `<option value="const" ${mapping?.mode === 'const' ? 'selected' : ''}>固定值</option>`;
-      // 公式列在来源下拉里要能看出来「这一列不是取数算的」，否则会被误认为留空
-      if (mapping?.formula_on === true && mapping?.mode !== 'const') {
-        html += `<option value="blank" selected>由公式计算（不使用来源）</option>`;
-      } else {
-        html += `<option value="blank" ${!primary?.table_id && mapping?.mode !== 'const' ? 'selected' : ''}>留空</option>`;
-      }
-      return html;
-    }
-
-    function fieldOptions(col, mapping) {
-      const primary = sourcesOf(mapping)[0];
-      const headers = primary ? tableHeaders(primary.table_id) : [];
-      if (!headers.length) return `<option value="">—</option>`;
-      return headers.map((header, index) => (
-        `<option value="${index}" ${Number(primary?.column_index) === index ? 'selected' : ''}>${esc(header)}</option>`
-      )).join('');
+    /**
+     * 来源候选（弹层里用）：按表分组的全部列，命中原因与分数标在后面。
+     * 命中信息来自后端：`matches` 是能直接用的，`candidates` 是没命中时的近似候选。
+     */
+    function sourcePickerGroups(col, result) {
+      const entries = activeEntries();
+      if (!entries.length) return '<div class="empty-inline">先在「数据来源」里选好数据表。</div>';
+      const hit = (result?.matches || []).find((m) => m.key === col.key);
+      const near = new Map((result?.candidates?.[col.key] || []).map((item) => [
+        `${item.table_id}|${item.column_index}`, item,
+      ]));
+      const groups = entries.map((entry) => {
+        const options = (entry.table.headers || []).map((header, index) => {
+          const id = `${entry.table.id}|${index}`;
+          const nearItem = near.get(id);
+          let mark = '';
+          if (hit && hit.table_id === entry.table.id && hit.column_index === index) {
+            mark = ` ✓${MATCH_VIA_LABELS[hit.via] || '命中'}`;
+            if (hit.via === 'alias' && hit.alias) mark = ` ✓备注名「${hit.alias}」`;
+            if (hit.via === 'similar') mark = ` ✓相似 ${Math.round((hit.score || 0) * 100)}%`;
+          } else if (nearItem) {
+            mark = ` · 相似 ${Math.round(nearItem.score * 100)}%`;
+          }
+          return `<option value="${attr(id)}">${esc(header)}${esc(mark)}</option>`;
+        }).join('');
+        return options ? `<optgroup label="${attr(entry.label)}">${options}</optgroup>` : '';
+      }).filter(Boolean).join('');
+      return groups;
     }
 
     function transformOptions(value) {
@@ -921,16 +903,11 @@ export default {
     function renderMappingSection() {
       const cols = includedColumns(config);
       const entries = activeEntries();
-      const mapped = cols.filter((c) => {
-        const m = config.mappings[c.key];
-        return m && (m.mode === 'const' || m.formula_on === true || sourcesOf(m).length);
-      }).length;
-      const formulaCount = cols.filter((c) => config.mappings[c.key]?.formula_on === true).length;
-      const chainCount = cols.filter((c) => sourcesOf(config.mappings[c.key]).length > 1).length;
-      const aggCount = cols.filter((c) => {
-        const combine = combineOf(config.mappings[c.key]);
-        return sourcesOf(config.mappings[c.key]).length && combine !== 'first';
-      }).length;
+      const states = cols.map((c) => mappingState(c.key));
+      const mapped = states.filter((s) => s.configured || s.formula || s.mapping?.mode === 'const').length;
+      const formulaCount = states.filter((s) => s.formula).length;
+      const chainCount = states.filter((s) => s.sources.length > 1).length;
+      const aggCount = states.filter((s) => s.sources.length && combineOf(s.mapping) !== 'first').length;
       return `
         <section class="section-card ${activeStep === 'mapping' ? 'step-active' : ''}" id="section-mapping" data-step="mapping">
           <div class="section-head" data-step-head="mapping">
@@ -938,7 +915,7 @@ export default {
             <div class="section-head-main">
               <h3>字段映射</h3>
               <p>每个目标列从哪来、多行怎么合并，在这里定。选好数据源后已按列名自动预匹配，
-                下面可以逐列调整，也可以点 ƒx 用公式算。</p>
+                逐列核对即可；点「映射」可以改来源、看候选与规则。</p>
             </div>
             <div class="section-head-actions">
               ${formulaCount ? `<span class="chip chip-brand">${formulaCount} 列用公式</span>` : ''}
@@ -956,23 +933,14 @@ export default {
               : `<div class="map-scroll">
                   <div class="map-table">
                     <div class="map-row head">
-                      <span>目标列</span><span>主来源</span><span>来源字段 / 公式</span><span>处理</span><span>缺省值</span><span></span>
+                      <span>目标列</span><span>来源</span><span>取值</span><span>状态</span><span>操作</span>
                     </div>
-                    ${cols.map((col) => renderMappingRow(col, entries)).join('')}
+                    ${cols.map((col) => renderMappingRow(col)).join('')}
                   </div>
                 </div>`}
-          <div class="tiny faint mt-10">缺省值会在来源为空或没有匹配到行时写入；选择「固定值」可给整列写入同一个内容。
-            字段右侧的 <b>ƒx</b> 可以用 Excel 公式算出整列；处理方式选「统一为日期」时可再指定显示格式。
-            <br>同一个主键在来源表里对应多行时，用每列下方的「取值」决定怎么合并：默认取第一个非空值，也可以求和、计数、取最新、拼接。</div>
+          <div class="tiny faint mt-10">「映射」弹层里可以改来源、加备用来源、设处理方式与缺省值、写公式；
+            「规则」看的是模板里这一列的校验要求（比如只允许哪些值）。</div>
         </section>`;
-    }
-
-    function aliasHint(mapping) {
-      const alias = mapping?.mode === 'table' ? mapping.matched_alias : '';
-      // 来源字段后来被改过就别再显示旧提示，免得误导
-      if (!alias || (sourcesOf(mapping)[0]?.column_name || '') !== alias) return '';
-      return `<div class="map-alias" title="模板列名的严格名称在来源表里没有，按括号里的备注名匹配到这里">
-        ${icon('info')}<span>括号备注名「${esc(alias)}」</span></div>`;
     }
 
     /** 一条来源的可读名字：`表名 · 列名`，列名丢了就退回列号。 */
@@ -980,26 +948,6 @@ export default {
       const headers = tableHeaders(src.table_id);
       const name = headers[src.column_index] || `第 ${Number(src.column_index) + 1} 列`;
       return `${tableLabel(src.table_id)} · ${name}`;
-    }
-
-    /** 「再叠加一列来源」的下拉：只列参与本次汇总的表，已经用过的列不再出现。 */
-    function addSourceOptions(key, sources) {
-      const active = activeIdSet();
-      const used = new Set(sources.map((src) => `${src.table_id}|${Number(src.column_index)}`));
-      const groups = availableTables()
-        .filter((entry) => active.has(entry.table.id))
-        .map((entry) => {
-          const opts = (entry.table.headers || [])
-            .map((header, index) => (used.has(`${entry.table.id}|${index}`) ? '' : `<option value="${attr(`${entry.table.id}|${index}`)}">${esc(header)}</option>`))
-            .filter(Boolean)
-            .join('');
-          return opts ? `<optgroup label="${attr(entry.label)}">${opts}</optgroup>` : '';
-        })
-        .filter(Boolean)
-        .join('');
-      if (!groups) return '';
-      return `<select class="select select-sm chain-add" data-add-source="${attr(key)}" title="这一列还有别的来源时，可以继续叠加，按顺序兜底或汇总">
-        <option value="">＋ 再叠加一个来源列…</option>${groups}</select>`;
     }
 
     /** `latest` 的排序列：只能选来源链里的表，否则后端会退回用本列自身比较。 */
@@ -1017,108 +965,64 @@ export default {
       return html;
     }
 
-    function chainNote(combine, count) {
-      const scope = count > 1 ? `这 ${count} 个来源按顺序` : '同一主键匹配到的多行';
-      if (combine === 'sum') return `${scope}的数值合计`;
-      if (combine === 'count') return `统计${scope}里有值的条数`;
-      if (combine === 'max' || combine === 'min') return `${scope}取${combine === 'max' ? '最大' : '最小'}的一个`;
-      if (combine === 'latest') return '按排序列取最新的一条';
-      if (combine === 'concat') return `${scope}拼接起来，重复的只留一次`;
-      return `${scope}，取第一个有值的`;
+    /** 状态标签：自动怎么命中的 / 手动 / 还没配。 */
+    function matchBadge(state) {
+      if (state.formula) return '<span class="map-badge fx">ƒx 公式</span>';
+      if (state.mapping?.mode === 'const') return '<span class="map-badge">固定值</span>';
+      if (!state.configured) return '<span class="map-badge off">未配置</span>';
+      if (!state.matched) return '<span class="map-badge manual">手动</span>';
+      const via = MATCH_VIA_LABELS[state.matched.via] || '自动';
+      const detail = state.matched.via === 'similar'
+        ? `${via} ${Math.round((state.matched.score || 0) * 100)}%`
+        : via;
+      const title = state.matched.via === 'alias'
+        ? `按括号里的备注名「${state.matched.alias}」匹配到`
+        : state.matched.via === 'similar'
+          ? `按列名相似度匹配到（${Math.round((state.matched.score || 0) * 100)}%），请核对`
+          : '按同名匹配到';
+      return `<span class="map-badge auto" title="${attr(title)}">${icon('wand', 'icon-sm')}${esc(detail)}</span>`;
     }
 
-    /** 一行专属的「取值方式」：合并方式 + 额外来源 + 排序列。 */
-    function renderChainRow(col, mapping, sources) {
-      const combine = combineOf(mapping);
-      const meta = COMBINES.find((item) => item.key === combine) || COMBINES[0];
-      const extra = sources.slice(1);
+    /** 目标列名 + 类型/必填。 */
+    function renderTargetCell(col) {
+      return `<div class="map-target">
+        <span class="name" title="${attr(col.name)}">${esc(col.name)}</span>
+        <span class="type">${typeName(col.type)}${col.required ? ' · 必填' : ''}</span>
+      </div>`;
+    }
+
+    function renderMappingRow(col) {
+      const state = mappingState(col.key);
+      const sourceText = state.formula
+        ? `公式：${formulaOf(state.mapping).trim() || '（空）'}`
+        : state.configured
+          ? (state.sources.length > 1
+            ? `${sourceLabel(state.sources[0])} 等 ${state.sources.length} 个来源`
+            : sourceLabel(state.sources[0]))
+          : state.mapping?.mode === 'const'
+            ? `固定值：${state.mapping.value || '（空）'}`
+            : '未配置';
+      const combine = combineOf(state.mapping);
+      const hasSource = state.configured;
       return `
-        <div class="map-chain" data-chain-row="${attr(col.key)}">
-          <span class="chain-lead" title="${attr(meta.hint)}">${icon('layers')}取值</span>
-          <select class="select select-sm" data-map-combine="${attr(col.key)}" title="${attr(meta.hint)}">
-            ${COMBINES.map((item) => `<option value="${item.key}" ${item.key === combine ? 'selected' : ''}>${item.label}</option>`).join('')}
-          </select>
-          <div class="chain-body">
-            <span class="chain-note">${esc(chainNote(combine, sources.length))}</span>
-            ${extra.map((src, i) => `<span class="chain-chip">
-              ${esc(sourceLabel(src))}
-              <button class="chain-x" type="button" data-src-remove="${attr(`${col.key}:${i + 1}`)}" title="移除这个来源">${icon('x')}</button>
-            </span>`).join('')}
-            ${addSourceOptions(col.key, sources)}
-          </div>
-          ${combine === 'latest' ? `<div class="chain-order">
-            <span class="chain-lead">按哪列排序</span>
-            <select class="select select-sm" data-map-order="${attr(col.key)}">${orderOptions(mapping, sources)}</select>
-          </div>` : ''}
-        </div>`;
-    }
-
-    /** 自动匹配标识：让用户一眼看出哪些列是机器配的、哪些是自己改的。 */
-    function autoBadge(mapping) {
-      if (!mapping?.auto_matched) return '';
-      const via = mapping.matched_via === 'alias' ? '备注名' : '同名';
-      return `<span class="map-auto" title="按列名自动匹配到（${via}），手动改过就会消失">${icon('wand', 'icon-sm')}自动 · ${via}</span>`;
-    }
-
-    function renderMappingRow(col, entries) {
-      const mapping = config.mappings[col.key];
-      const sources = sourcesOf(mapping);
-      const mode = mapping?.mode || 'blank';
-      const useFormula = mapping?.formula_on === true;
-      const expr = formulaOf(mapping);
-      const invalid = !useFormula && sources.some((src) => !tableHeaders(src.table_id).length);
-      const transform = sources[0]?.transform || 'direct';
-      const showDateFormat = !useFormula && sources.length > 0 && transform === 'date';
-      const statusOff = !useFormula && !sources.length && mode !== 'const';
-      const hasTable = sources.length > 0;
-      const candidates = !hasTable && mode !== 'const' && !useFormula ? candidateOptions(col) : '';
-      return `
-        <div class="map-row ${(statusOff || invalid) ? 'needs-attention' : ''}" data-map-row="${attr(col.key)}">
-          <div class="map-target">
-            <span class="name" title="${attr(col.name)}">${esc(col.name)}</span>
-            <span class="type">${typeName(col.type)}</span>
-            ${autoBadge(mapping)}
-          </div>
-          <select class="select select-sm" data-map-source="${attr(col.key)}">
-            ${mappingSourceOptions(col, mapping)}
-          </select>
-          <div class="map-field">
-            ${useFormula
-              ? `<button class="fx-chip" type="button" data-map-formula="${attr(col.key)}" title="点击编辑公式">
-                   <span class="fx-mark">ƒx</span>
-                   <span class="fx-expr">${esc(expr.trim() || '公式为空，点此填写')}</span>
-                 </button>`
-              : hasTable
-                ? `<div class="field-with-fx">
-                     <select class="select select-sm" data-map-field="${attr(col.key)}">${fieldOptions(col, mapping)}</select>
-                     <button class="fx-btn" type="button" data-map-formula="${attr(col.key)}" title="用 Excel 公式计算这一列">ƒx</button>
-                   </div>
-                   ${aliasHint(mapping)}`
-                : mode === 'const'
-                  ? `<input class="input input-sm" value="${attr(mapping?.value || '')}" data-map-const="${attr(col.key)}" placeholder="固定内容">`
-                  : candidates
-                    ? `<select class="select select-sm" data-map-candidate="${attr(col.key)}" title="没匹配上，从候选来源列里挑一个">
-                         <option value="">没匹配上，从候选里选…</option>${candidates}
-                       </select>`
-                    : `<span class="tiny faint">该列输出为空</span>`}
-          </div>
-          <div class="map-transform">
-            <select class="select select-sm" data-map-transform="${attr(col.key)}" ${!hasTable || useFormula ? 'disabled' : ''}>
-              ${transformOptions(transform)}
-            </select>
-            ${showDateFormat ? `<select class="select select-sm fmt-select" data-map-datefmt="${attr(col.key)}" title="日期显示格式">
-              ${DATE_FORMAT_PRESETS.map(([value, sample]) => `<option value="${attr(value)}" ${(sources[0]?.date_format || mapping?.date_format || '') === value ? 'selected' : ''}>${esc(sample)}</option>`).join('')}
-            </select>` : ''}
+        <div class="map-row ${hasSource || state.formula ? '' : 'needs-attention'}" data-map-row="${attr(col.key)}">
+          ${renderTargetCell(col)}
+          <div class="map-source" title="${attr(sourceText)}">
+            <span class="src-text ${hasSource || state.formula ? '' : 'off'}">${esc(sourceText)}</span>
+            ${hasSource && combine !== 'first' ? `<span class="map-chip">${esc(COMBINE_LABELS[combine] || combine)}</span>` : ''}
           </div>
           <div>
-            <input class="input input-sm" value="${attr(mapping?.fallback || '')}" data-map-fallback="${attr(col.key)}"
-              placeholder="${useFormula ? '公式结果' : hasTable ? '可留空' : '—'}" ${!hasTable || useFormula ? 'disabled' : ''}>
+            <select class="select select-sm" data-map-combine="${attr(col.key)}" title="同一主键匹配到多行时怎么合并" ${hasSource ? '' : 'disabled'}>
+              ${COMBINES.map((item) => `<option value="${item.key}" ${item.key === combine ? 'selected' : ''}>${item.label}</option>`).join('')}
+            </select>
           </div>
-          <div class="map-status ${invalid ? 'warn' : statusOff ? 'off' : ''}" title="${invalid ? '来源已失效' : statusOff ? '尚未配置' : useFormula ? '公式计算' : '已配置'}">
-            ${invalid ? icon('alert') : statusOff ? icon('info') : icon('check-circle')}
+          <div class="map-status-cell">${matchBadge(state)}</div>
+          <div class="map-actions">
+            <button class="icon-btn" type="button" data-map-open="${attr(col.key)}" title="映射：改来源、加备用来源、设处理方式">${icon('wand')}</button>
+            <button class="icon-btn" type="button" data-map-clear="${attr(col.key)}" title="清空这一列的来源" ${hasSource || state.formula ? '' : 'disabled'}>${icon('x')}</button>
+            <button class="icon-btn" type="button" data-map-rules="${attr(col.key)}" title="查看这一列的模板规则">${icon('rule')}</button>
           </div>
-        </div>
-        ${!useFormula && hasTable ? renderChainRow(col, mapping, sources) : ''}`;
+        </div>`;
     }
 
     function renderRail() {
@@ -1461,40 +1365,12 @@ export default {
         const btn = event.currentTarget;
         btn.disabled = true;
         try {
+          // 手动点是明确要求：所有列按列名重配一遍（自动预匹配才只填空位）
           const count = await autoMap();
           if (count) markDirty(true);
         } finally {
           btn.disabled = false;
         }
-      });
-      // 没匹配上的列：从候选下拉里挑一个来源列
-      view.querySelectorAll('[data-map-candidate]').forEach((select) => {
-        select.addEventListener('change', () => {
-          const key = select.dataset.mapCandidate;
-          const value = select.value;
-          if (!value) return;
-          const [tableId, rawIndex] = value.split('|');
-          const index = Number(rawIndex);
-          const headers = tableHeaders(tableId);
-          const old = config.mappings[key] || {};
-          config.mappings[key] = {
-            ...old,
-            mode: 'table',
-            auto_matched: false,
-            sources: [{
-              table_id: tableId,
-              column_index: index,
-              column_name: headers[index] || '',
-              transform: old.transform || 'direct',
-            }],
-            combine: combineOf(old),
-            separator: old.separator || '、',
-            order_by: old.order_by || null,
-            fallback: old.fallback || '',
-          };
-          delete config.mappings[key].user_blank;
-          markDirty(true);
-        });
       });
       // 映射列表为空时给一个跳到「数据来源」的入口，别让人卡在这一段
       view.querySelectorAll('[data-goto-sources]').forEach((btn) => btn.addEventListener('click', () => {
@@ -1503,178 +1379,28 @@ export default {
       view.querySelectorAll('[data-goto-mapping]').forEach((btn) => btn.addEventListener('click', () => {
         document.getElementById('section-mapping')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }));
-      view.querySelectorAll('[data-map-source]').forEach((select) => {
-        select.addEventListener('change', () => {
-          const key = select.dataset.mapSource;
-          const col = config.target.columns.find((c) => c.key === key);
-          if (!col) return;
-          const value = select.value;
-          const old = config.mappings[key] || {};
-          const chain = sourcesOf(old);
-          // 从「公式计算」改成具体来源时，把公式关掉（公式正文保留，随时能再打开）
-          const formulaOff = old.formula_on === true;
-          if (value === 'const') {
-            config.mappings[key] = { mode: 'const', value: old.value || '' };
-          } else if (value === 'blank' || value === '') {
-            // 明确留空的列不再被自动匹配覆盖
-            config.mappings[key] = { mode: 'blank', user_blank: true, formula: old.formula || '' };
-          } else if (value.startsWith('table:')) {
-            const tableId = value.slice(6);
-            const headers = tableHeaders(tableId);
-            // 先按同名猜一个默认字段；猜不到就落到第一列，再异步问一次后端
-            // （括号备注名的规则只在 column_match 里实现，前端不复刻）
-            const guess = headers.indexOf(col.name);
-            const index = guess >= 0 ? guess : 0;
-            // 换主来源时保留其余来源，避免手配好的兜底链被一次误操作清空
-            const rest = chain.filter((src) => src.table_id !== tableId);
-            config.mappings[key] = {
-              ...old,
-              mode: 'table',
-              formula_on: false,
-              // 手动改过就不再算「自动匹配」，标识会消失
-              auto_matched: false,
-              sources: [{ table_id: tableId, column_index: index, column_name: headers[index] || '', transform: old.transform || 'direct' }, ...rest],
-              combine: combineOf(old),
-              separator: old.separator || '、',
-              order_by: old.order_by || null,
-              fallback: old.fallback || '',
-            };
-            delete config.mappings[key].table_id;
-            delete config.mappings[key].column_index;
-            delete config.mappings[key].matched_alias;
-            delete config.mappings[key].user_blank;
-            if (guess < 0) fillByAlias(key, col.name, tableId, headers);
-          }
-          if (formulaOff) {
-            toast('这一列已改为按来源取数，原公式还留着，点 ƒx 可以再启用。', 'info');
-          }
-          markDirty(true);
-        });
-      });
-      view.querySelectorAll('[data-map-field]').forEach((select) => {
-        select.addEventListener('change', () => {
-          const key = select.dataset.mapField;
-          const mapping = config.mappings[key];
-          const chain = sourcesOf(mapping);
-          if (!chain.length) return;
-          const headers = tableHeaders(chain[0].table_id);
-          const index = Number(select.value);
-          chain[0].column_index = index;
-          chain[0].column_name = headers[index] || '';
-          mapping.sources = chain;
-          // 用户手选了字段，「靠括号备注名命中」和「自动匹配」的标记都不再成立
-          const hadAlias = !!mapping.matched_alias;
-          const hadAuto = mapping.auto_matched === true;
-          delete mapping.matched_alias;
-          mapping.auto_matched = false;
-          delete mapping.matched_via;
-          markDirty(hadAlias || hadAuto);
-          paintSaveStatus();
-        });
-      });
-      view.querySelectorAll('[data-map-transform]').forEach((select) => {
-        select.addEventListener('change', () => {
-          const key = select.dataset.mapTransform;
-          const mapping = config.mappings[key];
-          const chain = sourcesOf(mapping);
-          if (!mapping || !chain.length) return;
-          const wasDate = chain[0].transform === 'date';
-          chain[0].transform = select.value;
-          mapping.sources = chain;
-          // 手动改过处理方式就不再算「自动匹配」
-          const hadAuto = mapping.auto_matched === true;
-          mapping.auto_matched = false;
-          delete mapping.matched_via;
-          // 进出「统一为日期」都要重绘：进要出现格式下拉，出要收掉
-          markDirty(wasDate || select.value === 'date' || hadAuto);
-        });
-      });
+      // 映射行：只有「取值」留在行内，其余操作都在弹层里
       view.querySelectorAll('[data-map-combine]').forEach((select) => {
         select.addEventListener('change', () => {
-          const mapping = config.mappings[select.dataset.mapCombine];
-          if (!mapping) return;
-          mapping.combine = select.value;
-          // 手动定过合并方式就不再算「自动匹配」
-          const hadAuto = mapping.auto_matched === true;
-          mapping.auto_matched = false;
-          delete mapping.matched_via;
-          // 换成「取最新一条」时要出现排序列下拉，其他方式收掉
+          const key = select.dataset.mapCombine;
+          if (!config.mappings[key]) return;
+          setMapping(key, { combine: select.value, matched: null });
           markDirty(true);
         });
       });
-      view.querySelectorAll('[data-map-order]').forEach((select) => {
-        select.addEventListener('change', () => {
-          const mapping = config.mappings[select.dataset.mapOrder];
-          if (!mapping) return;
-          if (!select.value) {
-            mapping.order_by = null;
-          } else {
-            const [tableId, index] = select.value.split('|');
-            mapping.order_by = { table_id: tableId, column_index: Number(index) };
-          }
-          markDirty(false);
-        });
+      view.querySelectorAll('[data-map-open]').forEach((btn) => {
+        btn.addEventListener('click', () => openMappingDialog(btn.dataset.mapOpen));
       });
-      view.querySelectorAll('[data-add-source]').forEach((select) => {
-        select.addEventListener('change', () => {
-          const key = select.dataset.addSource;
-          const mapping = config.mappings[key];
-          if (!mapping || !select.value) return;
-          const [tableId, index] = select.value.split('|');
-          const chain = sourcesOf(mapping);
-          const headers = tableHeaders(tableId);
-          chain.push({
-            table_id: tableId,
-            column_index: Number(index),
-            column_name: headers[Number(index)] || '',
-            transform: 'direct',
-          });
-          mapping.sources = chain;
-          if (!mapping.combine) mapping.combine = 'first';
-          markDirty(true);
-        });
-      });
-      view.querySelectorAll('[data-src-remove]').forEach((btn) => {
+      view.querySelectorAll('[data-map-clear]').forEach((btn) => {
         btn.addEventListener('click', () => {
-          const [key, rawIndex] = btn.dataset.srcRemove.split(':');
-          const mapping = config.mappings[key];
-          if (!mapping) return;
-          const index = Number(rawIndex);
-          const chain = sourcesOf(mapping);
-          if (index <= 0 || index >= chain.length) return;
-          chain.splice(index, 1);
-          mapping.sources = chain;
+          const key = btn.dataset.mapClear;
+          clearMapping(key);
           markDirty(true);
+          toast('已清空这一列的来源。', 'info');
         });
       });
-      view.querySelectorAll('[data-map-datefmt]').forEach((select) => {
-        select.addEventListener('change', () => {
-          const mapping = config.mappings[select.dataset.mapDatefmt];
-          if (!mapping) return;
-          mapping.date_format = select.value;
-          scheduleSave();
-          const label = select.options[select.selectedIndex]?.text || select.value;
-          toast(select.value ? `日期显示为 ${label}` : '日期格式改回跟随全局设置', 'ok');
-        });
-      });
-      view.querySelectorAll('[data-map-formula]').forEach((btn) => {
-        btn.addEventListener('click', () => openFormulaDialog(btn.dataset.mapFormula));
-      });
-      view.querySelectorAll('[data-map-fallback]').forEach((input) => {
-        input.addEventListener('input', () => {
-          const mapping = config.mappings[input.dataset.mapFallback];
-          if (!mapping) return;
-          mapping.fallback = input.value;
-          scheduleSave();
-        });
-      });
-      view.querySelectorAll('[data-map-const]').forEach((input) => {
-        input.addEventListener('input', () => {
-          const mapping = config.mappings[input.dataset.mapConst];
-          if (!mapping) return;
-          mapping.value = input.value;
-          scheduleSave();
-        });
+      view.querySelectorAll('[data-map-rules]').forEach((btn) => {
+        btn.addEventListener('click', () => openRuleDialog(btn.dataset.mapRules));
       });
     }
 
@@ -1917,14 +1643,298 @@ export default {
           const existing = new Set(config.target.columns.map((c) => c.name));
           config.target.columns.push(...newCols.filter((c) => !existing.has(c.name)));
         }
-        autoMap({ silent: true }).then(() => markDirty(true));
+        autoMap({ silent: true, auto: true }).then(() => markDirty(true));
         ref.close();
         toast(`已导入 ${newCols.length} 个列名。`, 'ok');
       });
     }
 
+    // ---------- 字段映射弹层 ----------
+    /**
+     * 「映射」弹层：一列的来源与各项设置都在这里改。
+     *
+     * 主表上只留一行紧凑信息（目标列 / 来源 / 取值 / 状态 / 操作），
+     * 细节（备用来源、处理方式、缺省值、公式）都收进这个弹层，
+     * 避免每个目标列在页面上占两行、按钮散落各处。
+     *
+     * 改动**即时生效**（没有"草稿/应用"两段状态），关掉弹层即完成。
+     */
+    async function openMappingDialog(colKey) {
+      const col = config.target.columns.find((c) => c.key === colKey);
+      if (!col) return;
+      if (!activeEntries().length) {
+        toast('先在「数据来源」里选好数据表。', 'warn');
+        return;
+      }
+      // 同一时间只留一个映射弹层
+      if (mappingDialog) {
+        mappingDialog.close();
+        mappingDialog = null;
+      }
+      const state = mappingState(colKey);
+      const primary = state.sources[0];
+      const tables = activeEntries().map((entry) => ({ id: entry.table.id, headers: entry.table.headers || [] }));
+
+      // 让后端给一次「最佳匹配 + 候选」，用来在选项上标出命中原因
+      let matchInfo = { matches: [], candidates: {} };
+      try {
+        matchInfo = await api.matchColumns([{ key: colKey, name: col.name }], tables);
+      } catch (err) {
+        toast(`候选来源获取失败：${err.message || err}`, 'error');
+      }
+      const hit = (matchInfo.matches || [])[0];
+      const near = (matchInfo.candidates || {})[colKey] || [];
+      const hint = hit
+        ? `已按「${MATCH_VIA_LABELS[hit.via] || '列名'}」匹配到 ${esc(hit.column_name || '')}${hit.via === 'alias' && hit.alias ? `（括号备注名「${esc(hit.alias)}」）` : ''}${hit.via === 'similar' ? `（相似 ${Math.round((hit.score || 0) * 100)}%，请核对）` : ''}。`
+        : near.length
+          ? '没有同名或括号备注名同名的列，下面按相似度排了候选，选一个即可。'
+          : '这些表里没有能对上的列，可以选任意一列，或清空这一列。';
+
+      const ref = openModal({
+        title: `映射「${col.name}」`,
+        sub: '选来源列、定处理方式；同一主键匹配到多行时用「取值」决定怎么合并。',
+        size: 'modal-lg',
+        body: `
+          <div class="map-hint">${icon('info')}<span>${hint}</span></div>
+          <div class="field mt-14">
+            <label class="field-label" for="mp-source">来源列</label>
+            <select class="select" id="mp-source" data-mp-source>
+              <option value="">留空（这一列不取数）</option>
+              ${sourcePickerGroups(col, matchInfo)}
+            </select>
+            <div class="field-hint">按表分组；带 ✓ 的是自动匹配上的，带「相似」的是按列名相近度推荐的。</div>
+          </div>
+          <div class="field mt-14">
+            <span class="field-label">备用来源 <span class="faint" style="font-weight:400">（按顺序兜底；求和/计数/取最新时一起参与）</span></span>
+            <div class="chain-body mt-6" data-mp-extra></div>
+          </div>
+          <div class="form-grid cols-2 mt-14">
+            <div class="field">
+              <label class="field-label" for="mp-combine">取值方式</label>
+              <select class="select" id="mp-combine" data-mp-combine>
+                ${COMBINES.map((item) => `<option value="${item.key}" ${item.key === combineOf(state.mapping) ? 'selected' : ''}>${item.label}</option>`).join('')}
+              </select>
+              <div class="field-hint" data-mp-combine-hint></div>
+            </div>
+            <div class="field" data-mp-order-wrap hidden>
+              <label class="field-label" for="mp-order">按哪列排序</label>
+              <select class="select" id="mp-order" data-mp-order>
+                <option value="">按本列自身比较</option>
+                ${orderOptions(state.mapping, state.sources)}
+              </select>
+              <div class="field-hint">「取最新一条」用它：按日期列排序后取那行的本列值。</div>
+            </div>
+          </div>
+          <div class="form-grid cols-2 mt-14">
+            <div class="field">
+              <label class="field-label" for="mp-transform">处理方式</label>
+              <select class="select" id="mp-transform" data-mp-transform>
+                ${transformOptions(primary?.transform || 'direct')}
+              </select>
+            </div>
+            <div class="field">
+              <label class="field-label" for="mp-datefmt">日期显示格式</label>
+              <select class="select" id="mp-datefmt" data-mp-datefmt>
+                ${DATE_FORMAT_PRESETS.map(([value, sample]) => `<option value="${attr(value)}" ${(state.mapping?.date_format || '') === value ? 'selected' : ''}>${esc(sample)}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+          <div class="field mt-14">
+            <label class="field-label" for="mp-fallback">缺省值</label>
+            <input class="input" id="mp-fallback" data-mp-fallback value="${attr(state.mapping?.fallback || '')}" placeholder="来源为空或没匹配到行时写入的内容">
+          </div>
+          <div class="field mt-14">
+            <span class="field-label">公式</span>
+            <div class="flex items-center gap-10 flex-wrap">
+              <button class="btn btn-secondary btn-sm" type="button" data-mp-formula>${icon('sparkle')}写公式</button>
+              <span class="tiny faint" data-mp-formula-text>${state.formula ? esc(formulaOf(state.mapping)) : '这一列现在按来源取数'}</span>
+            </div>
+          </div>`,
+        footer: `<button class="btn btn-secondary" type="button" data-mp-clear>清空这一列</button>
+                 <button class="btn btn-primary" type="button" data-close>完成</button>`,
+      });
+      mappingDialog = ref;
+      ref.modal.querySelector('[data-close]').addEventListener('click', () => {
+        mappingDialog = null;
+        ref.close();
+      });
+
+      const body = ref.body;
+      const extraBox = body.querySelector('[data-mp-extra]');
+      const orderWrap = body.querySelector('[data-mp-order-wrap]');
+      const orderSelect = body.querySelector('[data-mp-order]');
+      const combineSelect = body.querySelector('[data-mp-combine]');
+      const combineHint = body.querySelector('[data-mp-combine-hint]');
+      const sourceSelect = body.querySelector('[data-mp-source]');
+      const transformSelect = body.querySelector('[data-mp-transform]');
+
+      const paintExtras = () => {
+        const chain = sourcesOf(config.mappings[colKey]);
+        const used = new Set(chain.map((src) => `${src.table_id}|${Number(src.column_index)}`));
+        const chips = chain.slice(1).map((src, i) => `<span class="chain-chip">${esc(sourceLabel(src))}
+          <button class="chain-x" type="button" data-mp-remove="${attr(i + 1)}" title="移除">${icon('x')}</button></span>`).join('');
+        const groups = activeEntries().map((entry) => {
+          const opts = (entry.table.headers || [])
+            .map((header, index) => (used.has(`${entry.table.id}|${index}`) ? '' : `<option value="${attr(`${entry.table.id}|${index}`)}">${esc(header)}</option>`))
+            .filter(Boolean).join('');
+          return opts ? `<optgroup label="${attr(entry.label)}">${opts}</optgroup>` : '';
+        }).filter(Boolean).join('');
+        extraBox.innerHTML = `${chips}<select class="select select-sm chain-add" data-mp-add>
+          <option value="">＋ 叠加一个来源列…</option>${groups}</select>`;
+        extraBox.querySelector('[data-mp-add]')?.addEventListener('change', (e) => {
+          if (!e.target.value) return;
+          const [tableId, index] = e.target.value.split('|');
+          const chain2 = sourcesOf(config.mappings[colKey]);
+          chain2.push({
+            table_id: tableId,
+            column_index: Number(index),
+            column_name: tableHeaders(tableId)[Number(index)] || '',
+            transform: 'direct',
+          });
+          setMapping(colKey, { mode: 'table', sources: chain2, matched: null });
+          markDirty(true);
+          paintExtras();
+        });
+        extraBox.querySelectorAll('[data-mp-remove]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const chain2 = sourcesOf(config.mappings[colKey]);
+            const index = Number(btn.dataset.mpRemove);
+            if (index <= 0 || index >= chain2.length) return;
+            chain2.splice(index, 1);
+            setMapping(colKey, { mode: 'table', sources: chain2, matched: null });
+            markDirty(true);
+            paintExtras();
+          });
+        });
+      };
+
+      const paintCombine = () => {
+        const key = combineSelect.value;
+        const meta = COMBINES.find((item) => item.key === key) || COMBINES[0];
+        combineHint.textContent = meta.hint;
+        orderWrap.hidden = key !== 'latest';
+      };
+
+      // 选中来源列 → 成为主来源
+      sourceSelect.value = primary ? `${primary.table_id}|${Number(primary.column_index)}` : '';
+      sourceSelect.addEventListener('change', () => {
+        if (!sourceSelect.value) {
+          clearMapping(colKey);
+          markDirty(true);
+          ref.close();
+          return;
+        }
+        const [tableId, index] = sourceSelect.value.split('|');
+        const headers = tableHeaders(tableId);
+        // 选主来源 = 换掉整条来源链；备用来源由下面的「叠加一个来源列」显式添加
+        setMapping(colKey, {
+          mode: 'table',
+          sources: [{
+            table_id: tableId,
+            column_index: Number(index),
+            column_name: headers[Number(index)] || '',
+            transform: primary?.transform || 'direct',
+          }],
+          matched: null,          // 手动改过就不再是「自动」
+        });
+        transformSelect.value = primary?.transform || 'direct';
+        markDirty(true);
+        paintExtras();
+      });
+
+      combineSelect.addEventListener('change', () => {
+        setMapping(colKey, { combine: combineSelect.value, matched: null });
+        markDirty(true);
+        paintCombine();
+      });
+      orderSelect.addEventListener('change', () => {
+        if (!orderSelect.value) {
+          setMapping(colKey, { order_by: null });
+        } else {
+          const [tableId, index] = orderSelect.value.split('|');
+          setMapping(colKey, { order_by: { table_id: tableId, column_index: Number(index) } });
+        }
+        markDirty(false);
+      });
+      transformSelect.addEventListener('change', () => {
+        const chain = sourcesOf(config.mappings[colKey]);
+        if (!chain.length) return;
+        chain[0].transform = transformSelect.value;
+        setMapping(colKey, { sources: chain, matched: null });
+        markDirty(false);
+      });
+      body.querySelector('[data-mp-datefmt]')?.addEventListener('change', (e) => {
+        setMapping(colKey, { date_format: e.target.value });
+        markDirty(false);
+      });
+      body.querySelector('[data-mp-fallback]')?.addEventListener('input', (e) => {
+        setMapping(colKey, { fallback: e.target.value });
+        scheduleSave();
+      });
+      body.querySelector('[data-mp-formula]')?.addEventListener('click', () => {
+        openFormulaDialog(colKey, () => {
+          const text = body.querySelector('[data-mp-formula-text]');
+          if (text) text.textContent = formulaOf(config.mappings[colKey]) || '这一列现在按来源取数';
+        });
+      });
+      body.querySelector('[data-mp-clear]')?.addEventListener('click', () => {
+        clearMapping(colKey);
+        markDirty(true);
+        mappingDialog = null;
+        ref.close();
+      });
+
+      paintExtras();
+      paintCombine();
+    }
+
+    /** 规则：目标列在模板里的校验要求（必填、枚举、格式、长度…）。 */
+    function openRuleDialog(colKey) {
+      const col = config.target.columns.find((c) => c.key === colKey);
+      if (!col) return;
+      const template = targetTemplate();
+      const field = (template?.fields || []).find((f) => String(f.name || '').trim() === String(col.name || '').trim());
+      const rules = (field?.rules || []).map((rule) => ({
+        text: ruleText(rule),
+        message: rule.message || '',
+      }));
+      const required = !!(field?.required || col.required);
+      const ref = openModal({
+        title: `「${col.name}」的规则`,
+        sub: template ? `来自模板「${template.name}」` : '当前方案没有用模板',
+        size: 'modal-sm',
+        body: `
+          ${!template ? '<div class="empty-inline">这个方案没有用数据模板，规则由数据本身决定。</div>' : ''}
+          ${template && !field ? '<div class="warning-note">模板里没有同名字段，这条规则可能已经过期，点「一键同步字段」可以对齐。</div>' : ''}
+          ${field ? `
+            <div class="rule-list mt-12">
+              <div class="rule-item">${icon(required ? 'alert' : 'info')}<span>${required ? '<b>必填</b>：这一列不能为空' : '非必填：空着也可以'}</span></div>
+              ${rules.length ? rules.map((r) => `<div class="rule-item">${icon('rule')}<span><b>${esc(r.text)}</b>${r.message ? `（${esc(r.message)}）` : ''}</span></div>`).join('')
+                : '<div class="rule-item">' + icon('info') + '<span>没有额外的校验规则</span></div>'}
+              ${field.note ? `<div class="rule-item">${icon('info')}<span>${esc(field.note)}</span></div>` : ''}
+              ${field.default ? `<div class="rule-item">${icon('info')}<span>默认值：${esc(field.default)}</span></div>` : ''}
+            </div>` : ''}`,
+        footer: `<button class="btn btn-primary" type="button" data-close>知道了</button>`,
+      });
+      ref.modal.querySelector('[data-close]').addEventListener('click', ref.close);
+    }
+
+    /** 规则的中文描述（与后端 tmplib.describe_rule 保持一致）。 */
+    function ruleText(rule) {
+      const kind = rule?.kind;
+      const value = rule?.value;
+      if (kind === 'unique') return '不允许重复';
+      if (kind === 'enum') return `仅限：${(value || []).slice(0, 6).join(' / ')}`;
+      if (kind === 'pattern') return `匹配 ${value}`;
+      if (kind === 'min') return `≥ ${value}`;
+      if (kind === 'max') return `≤ ${value}`;
+      if (kind === 'min_len') return `至少 ${value} 字`;
+      if (kind === 'max_len') return `最多 ${value} 字`;
+      return String(kind || '');
+    }
+
     // ---------- 字段公式 ----------
-    function openFormulaDialog(colKey) {
+    function openFormulaDialog(colKey, onDone) {
       const col = config.target.columns.find((c) => c.key === colKey);
       if (!col) return;
       const tableIds = activeIds();
@@ -2098,6 +2108,7 @@ export default {
         ref.close();
         markDirty(true);
         toast('公式已应用，生成时会按公式计算这一列。', 'ok');
+        if (typeof onDone === 'function') onDone();
       });
 
       loadFormulaHelp().then((help) => {

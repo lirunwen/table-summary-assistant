@@ -636,11 +636,14 @@ def create_app(port: int | None = None, host: str = "127.0.0.1") -> Flask:
     @app.post("/api/match-columns")
     @api_route
     def match_columns():
-        """按列名自动匹配来源列：严格同名优先，未命中时用模板列名括号里的备注名。
+        """按列名匹配来源列：规范化精确 → 括号备注名 → 相似度。
 
         规则全部在 `column_match` 里，前端不再自己实现一套，避免两边慢慢跑偏。
         请求：`{columns: [{key, name}], tables: [{id, headers}]}`，
         其中 `tables` 的顺序就是优先级（主表在前，关联表按添加顺序）。
+
+        返回 `matches`（命中的）与 `candidates`（没命中的目标列的候选来源列），
+        两者都带 `table_id`，界面直接用。
         """
         payload = request.get_json(silent=True) or {}
         columns = payload.get("columns") or []
@@ -649,17 +652,26 @@ def create_app(port: int | None = None, host: str = "127.0.0.1") -> Flask:
             raise UserError("匹配请求格式不正确。")
         tables = [t for t in tables if isinstance(t, dict)]
         header_lists = [[str(h) for h in (t.get("headers") or [])] for t in tables]
-        matches = column_match.match_columns(columns, header_lists)
-        for item in matches:
-            pos = item.pop("table_pos")
-            item["table_id"] = tables[pos].get("id") if pos < len(tables) else None
+        result = column_match.match_columns(columns, header_lists)
+
+        def with_table(item: dict) -> dict:
+            pos = item.get("table_pos")
+            return {**item, "table_id": tables[pos].get("id") if isinstance(pos, int) and pos < len(tables) else None}
+
+        matches = [with_table(item) for item in result["matches"]]
+        candidates = {
+            key: [with_table(item) for item in items]
+            for key, items in (result.get("candidates") or {}).items()
+        }
         return {
             "matches": matches,
+            "candidates": candidates,
             "stats": {
                 "checked": len(columns),
                 "matched": len(matches),
-                "by_name": sum(1 for m in matches if m["via"] == column_match.NAME),
+                "by_name": sum(1 for m in matches if m["via"] == column_match.EXACT),
                 "by_alias": sum(1 for m in matches if m["via"] == column_match.ALIAS),
+                "by_similar": sum(1 for m in matches if m["via"] == column_match.SIMILAR),
             },
         }
 

@@ -67,42 +67,62 @@ try {
     JSON.stringify(order));
   check('段落编号为 1/2/3', order.map((o) => o.num).join('') === '123', JSON.stringify(order.map((o) => o.num)));
 
-  // --- 2. 每行都有「取值」条 ---
+  // --- 2. 每个目标列只占一行 ---
   const rows = await page.$$eval('[data-map-row]', (els) => els.map((el) => el.dataset.mapRow));
   const chains = await page.$$eval('[data-chain-row]', (els) => els.map((el) => el.dataset.chainRow));
   check('5 个目标列都渲染了映射行', rows.length === 5, rows.join(','));
-  check('5 个目标列都有取值条', chains.length === 5, chains.join(','));
+  check('没有单独的「取值」第二行（取值并入行内下拉）', chains.length === 0, chains.join(','));
 
-  // --- 3. 多来源：手机号那一行有两个来源，一个 chip + 1 个主来源 ---
+  // --- 3. 多来源：手机号那一行有两个来源 ---
   const phone = await page.evaluate(() => {
-    const row = document.querySelector('[data-chain-row="c2"]');
+    const row = document.querySelector('[data-map-row="c2"]');
     return {
-      chips: [...row.querySelectorAll('.chain-chip')].map((c) => c.textContent.trim()),
-      combine: row.querySelector('[data-map-combine]')?.value,
-      note: row.querySelector('.chain-note')?.textContent.trim(),
+      source: row?.querySelector('.src-text')?.textContent.trim() || '',
+      combine: row?.querySelector('[data-map-combine]')?.value,
+      chip: row?.querySelector('.map-chip')?.textContent.trim() || '',
     };
   });
-  check('手机号列叠了第二个来源', phone.chips.length === 1 && phone.chips[0].includes('医院'), JSON.stringify(phone));
+  check('手机号列显示了两个来源', /等 \d+ 个来源/.test(phone.source), JSON.stringify(phone));
   check('手机号的合并方式是 first', phone.combine === 'first', phone.combine);
 
-  // --- 4. 聚合与最新：combine 值回显正确，latest 出现排序列 ---
+  // --- 4. 聚合与最新：取值方式回显正确，排序列在「映射」弹层里 ---
   const agg = await page.evaluate(() => {
     const val = (key) => document.querySelector(`[data-map-combine="${key}"]`)?.value;
-    return {
-      sum: val('c3'),
-      latest: val('c4'),
-      order: document.querySelector('[data-map-order="c4"]')?.value || '',
-      orderText: (() => {
-        const sel = document.querySelector('[data-map-order="c4"]');
-        return sel ? sel.options[sel.selectedIndex]?.textContent.trim() : null;
-      })(),
-      hasOrderC3: !!document.querySelector('[data-map-order="c3"]'),
-    };
+    return { sum: val('c3'), latest: val('c4') };
   });
   check('加班合计列为求和', agg.sum === 'sum', agg.sum);
   check('最近医院列为取最新一条', agg.latest === 'latest', agg.latest);
-  check('latest 有排序列且指向日期', /日期/.test(agg.orderText || ''), `${agg.orderText} (${agg.order})`);
-  check('非 latest 的行不显示排序列', agg.hasOrderC3 === false, String(agg.hasOrderC3));
+
+  // 打开「映射」弹层，latest 应出现排序列下拉
+  await page.click('[data-map-open="c4"]');
+  await page.waitForSelector('[data-mp-source]', { timeout: 10000 });
+  await wait(600);
+  const latest = await page.evaluate(() => {
+    const wrap = document.querySelector('[data-mp-order-wrap]');
+    const sel = document.querySelector('[data-mp-order]');
+    return {
+      shown: wrap ? !wrap.hidden : false,
+      value: sel?.value || '',
+      text: sel ? sel.options[sel.selectedIndex]?.textContent.trim() : '',
+    };
+  });
+  check('latest 行的弹层里出现排序列', latest.shown === true, JSON.stringify(latest));
+  check('排序列指向日期', /日期/.test(latest.text || ''), `${latest.text} (${latest.value})`);
+  await page.evaluate(() => (() => { const ms = document.querySelectorAll('.modal'); ms[ms.length - 1]?.querySelector('[data-close]')?.click(); })());
+  await wait(500);
+
+  // 非 latest 的行：弹层里不出现排序列
+  await page.click('[data-map-open="c3"]');
+  await page.waitForSelector('[data-mp-source]', { timeout: 10000 });
+  await wait(500);
+  const sumRow = await page.evaluate(() => {
+    const wrap = document.querySelector('[data-mp-order-wrap]');
+    return { shown: wrap ? !wrap.hidden : false, combine: document.querySelector('[data-mp-combine]')?.value };
+  });
+  check('非 latest 的行不显示排序列', sumRow.shown === false, JSON.stringify(sumRow));
+  check('弹层里的取值方式与行内一致', sumRow.combine === 'sum', sumRow.combine);
+  await page.evaluate(() => (() => { const ms = document.querySelectorAll('.modal'); ms[ms.length - 1]?.querySelector('[data-close]')?.click(); })());
+  await wait(500);
 
   // --- 5. 预览：列完成度面板 ---
   await page.click('[data-preview]');
@@ -122,31 +142,38 @@ try {
   await page.evaluate(() => document.querySelector('.modal-close, [data-close]')?.click());
   await wait(300);
 
-  // --- 6. 切合并方式：count 后说明文字跟着变 ---
+  // --- 6. 切合并方式：行内下拉直接改，取值标签跟着变 ---
   await page.select('[data-map-combine="c3"]', 'count');
-  await wait(500);
-  const afterCount = await page.evaluate(() => {
-    const row = document.querySelector('[data-chain-row="c3"]');
-    return row.querySelector('.chain-note')?.textContent.trim();
-  });
-  check('切成计数后说明文字更新', /条数/.test(afterCount || ''), afterCount);
+  await wait(600);
+  const afterCount = await page.evaluate(() => ({
+    combine: document.querySelector('[data-map-combine="c3"]')?.value,
+    chip: document.querySelector('[data-map-row="c3"] .map-chip')?.textContent.trim() || '',
+  }));
+  check('切合并方式后行内取值标签更新', /计数/.test(afterCount.chip || ''), JSON.stringify(afterCount));
 
-  // --- 7. 追加一个来源 ---
-  const added = await page.evaluate(() => {
-    const sel = document.querySelector('[data-add-source="c3"]');
+  // --- 7. 在「映射」弹层里叠加第二个来源 ---
+  await page.click('[data-map-open="c3"]');
+  await page.waitForSelector('[data-mp-source]', { timeout: 10000 });
+  await wait(500);
+  const addValue = await page.evaluate(() => {
+    const sel = document.querySelector('[data-mp-add]');
     if (!sel) return null;
     const opt = [...sel.options].find((o) => o.value);
-    if (!opt) return null;
-    return opt.value;
+    return opt ? opt.value : null;
   });
-  if (added) {
-    await page.select('[data-add-source="c3"]', added);
-    await wait(500);
-    const chipAfter = await page.evaluate(() => document.querySelector('[data-chain-row="c3"] .chain-chip')?.textContent.trim());
-    check('可以为同一列叠加第二来源', !!chipAfter, chipAfter || '(没有 chip)');
-  } else {
-    check('可以为同一列叠加第二来源', false, '没有可选的追加来源');
+  check('弹层里可以叠加第二个来源', !!addValue, String(addValue));
+  if (addValue) {
+    await page.select('[data-mp-add]', addValue);
+    await wait(800);
+    const afterAdd = await page.evaluate(() => ({
+      chips: [...document.querySelectorAll('[data-mp-extra] .chain-chip')].map((c) => c.textContent.trim()),
+      source: document.querySelector('[data-map-row="c3"] .src-text')?.textContent.trim() || '',
+    }));
+    check('叠加后弹层里出现来源 chip', afterAdd.chips.length >= 1, JSON.stringify(afterAdd.chips));
+    check('叠加后行内显示「等 N 个来源」', /等 \d+ 个来源/.test(afterAdd.source), afterAdd.source);
   }
+  await page.evaluate(() => (() => { const ms = document.querySelectorAll('.modal'); ms[ms.length - 1]?.querySelector('[data-close]')?.click(); })());
+  await wait(500);
 
   // --- 8. F6 回归：取消勾选某列不应报「模板新增字段」 ---
   // 目标列详情默认收起，先展开才拿得到勾选框

@@ -120,14 +120,18 @@ def test_two_targets_can_share_one_source_column():
 def test_match_columns_reports_via_and_raw_name():
     columns = [{"key": "c1", "name": "月薪（税前）"}, {"key": "c2", "name": "找不到"}]
     out = cm.match_columns(columns, [["税前"]])
-    assert out == [{
+    assert out["matches"] == [{
         "key": "c1", "name": "月薪（税前）", "table_pos": 0,
         "column_index": 0, "column_name": "税前", "via": cm.ALIAS, "alias": "税前",
+        "score": 1.0,
     }]
+    # 没命中的列没有候选（"找不到"与"税前"差太远）
+    assert out["candidates"] == {}
 
 
 def test_match_columns_ignores_non_dict_items():
-    assert cm.match_columns(["坏数据"], [["姓名"]]) == []
+    out = cm.match_columns(["坏数据"], [["姓名"]])
+    assert out["matches"] == []
 
 
 # ---------- 单表缓存版（engine 纵向合并用） ----------
@@ -162,7 +166,11 @@ def test_api_match_columns(client):
     assert got["c1"]["alias"] == "税前"
     assert got["c2"]["table_id"] == "t1"
     assert got["c2"]["via"] == cm.NAME
-    assert data["stats"] == {"checked": 2, "matched": 2, "by_name": 1, "by_alias": 1}
+    assert data["stats"] == {
+        "checked": 2, "matched": 2, "by_name": 1, "by_alias": 1, "by_similar": 0,
+    }
+    # 没命中的列会带上候选来源列
+    assert "candidates" in data
 
 
 def test_api_match_columns_tolerates_empty_payload(client):

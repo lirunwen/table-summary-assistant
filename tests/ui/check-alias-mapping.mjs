@@ -58,38 +58,33 @@ try {
 
   // --- 2. 点「按列名匹配」 ---
   await page.click('[data-auto-map]');
-  await page.waitForSelector('[data-map-field="k1"]', { timeout: 10000 });
-  await wait(600);
+  await wait(1500);
 
   const picked = await page.evaluate(() => {
-    const text = (key) => {
-      const sel = document.querySelector(`[data-map-field="${key}"]`);
-      return sel ? sel.options[sel.selectedIndex]?.textContent.trim() : null;
-    };
-    const source = (key) => document.querySelector(`[data-map-source="${key}"]`)?.value || '';
     const row = (key) => document.querySelector(`[data-map-row="${key}"]`);
+    const src = (key) => row(key)?.querySelector('.src-text')?.textContent.trim() || '';
+    const badge = (key) => row(key)?.querySelector('.map-badge')?.textContent.trim() || '';
     return {
-      k0: { field: text('k0'), source: source('k0') },
-      k1: { field: text('k1'), source: source('k1'), alias: row('k1')?.querySelector('.map-alias')?.textContent.trim() || '' },
-      k2: { field: text('k2'), source: source('k2') },
+      k0: { source: src('k0'), badge: badge('k0') },
+      k1: { source: src('k1'), badge: badge('k1') },
+      k2: { source: src('k2'), badge: badge('k2') },
       toast: document.querySelector('[data-toast]')?.textContent || '',
     };
   });
 
   // 严格同名：姓名在两表都有，按 append_tables 顺序取第一张（工资表）
-  check('姓名按同名匹配到工资表', picked.k0.source === `table:${ctx.wage_id}` && picked.k0.field === '姓名',
-    `${picked.k0.source} / ${picked.k0.field}`);
+  check('姓名按同名匹配到工资表', /工资表|wage/.test(picked.k0.source) && /姓名/.test(picked.k0.source),
+    picked.k0.source);
   // 括号备注名：模板列「月薪（税前）」→ 工资表的「税前」
   check('月薪（税前）按括号备注名匹配到「税前」',
-    picked.k1.source === `table:${ctx.wage_id}` && picked.k1.field === '税前',
-    `${picked.k1.source} / ${picked.k1.field}`);
-  check('映射行标出了别名来源', picked.k1.alias.includes('税前'), picked.k1.alias);
-  check('部门按同名匹配到通讯录', picked.k2.source === `table:${ctx.contact_id}` && picked.k2.field === '部门',
-    `${picked.k2.source} / ${picked.k2.field}`);
+    /工资表|wage/.test(picked.k1.source) && /税前/.test(picked.k1.source), picked.k1.source);
+  check('映射行标出了匹配层级（备注名）', /备注名/.test(picked.k1.badge), picked.k1.badge);
+  check('部门按同名匹配到通讯录', /通讯录|contact/.test(picked.k2.source) && /部门/.test(picked.k2.source),
+    picked.k2.source);
   check('提示区分了同名与括号备注名',
-    picked.toast.includes('同名 2 列') && picked.toast.includes('括号备注名 1 列'), picked.toast);
+    picked.toast.includes('同名') && picked.toast.includes('备注名'), picked.toast);
 
-  // --- 3. 截图（此时别名提示还在） ---
+  // --- 3. 截图（此时状态标签还在） ---
   await page.screenshot({ path: '/tmp/ui_alias_shot.png', fullPage: true });
   const section = await page.$('#section-mapping');
   if (section) await section.screenshot({ path: '/tmp/ui_alias_map.png' });
@@ -104,17 +99,24 @@ try {
   }, BASE, ctx.profile_id);
   const k1src = (saved.k1?.sources || [])[0] || {};
   check('括号别名匹配结果已保存', k1src.column_index === 1 && k1src.column_name === '税前'
-    && saved.k1?.matched_alias === '税前', JSON.stringify(saved.k1 || {}));
+    && saved.k1?.matched?.via === 'alias', JSON.stringify(saved.k1 || {}));
 
-  // --- 5. 手改来源字段后，别名提示要消失 ---
-  await page.select('[data-map-field="k1"]', '0');
+  // --- 5. 手改来源后，状态变成「手动」 ---
+  await page.click('[data-map-open="k1"]');
+  await page.waitForSelector('[data-mp-source]', { timeout: 10000 });
+  await wait(500);
+  await page.evaluate(() => {
+    const sel = document.querySelector('[data-mp-source]');
+    const opt = [...sel.options].find((o) => o.value && o.value !== sel.value);
+    if (opt) { sel.value = opt.value; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+  });
+  await wait(900);
+  await page.evaluate(() => (() => { const ms = document.querySelectorAll('.modal'); ms[ms.length - 1]?.querySelector('[data-close]')?.click(); })());
   await wait(500);
   const afterManual = await page.evaluate(() => ({
-    field: document.querySelector('[data-map-field="k1"]')?.selectedOptions[0]?.textContent.trim(),
-    alias: document.querySelector('[data-map-row="k1"] .map-alias')?.textContent || '',
+    badge: document.querySelector('[data-map-row="k1"] .map-badge')?.textContent.trim() || '',
   }));
-  check('手改字段后别名提示消失', afterManual.field === '姓名' && !afterManual.alias,
-    `${afterManual.field} / ${afterManual.alias}`);
+  check('手改来源后不再标「备注名」', /手动/.test(afterManual.badge), afterManual.badge);
 
   check('没有前端 JS 报错', jsErrors.length === 0, jsErrors.slice(0, 3).join(' | '));
 } finally {

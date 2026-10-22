@@ -29,6 +29,13 @@ const browser = await puppeteer.launch({
 
 try {
   const page = await browser.newPage();
+  // 打开「映射」弹层：等旧的弹层关掉，确认页面上只有一层，避免选到上一次的控件
+  const openMapping = async (key) => {
+    await page.click(`[data-map-open="${key}"]`);
+    await page.waitForSelector('[data-mp-source]', { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll('.modal').length === 1, { timeout: 10000 });
+    await wait(400);
+  };
   await page.setViewport({ width: 1440, height: 1000 });
   const jsErrors = [];
   page.on('pageerror', (e) => jsErrors.push(String(e)));
@@ -38,14 +45,15 @@ try {
   await page.waitForSelector('[data-map-row="k1"]', { timeout: 15000 });
   await wait(300);
 
-  // --- 1. 每行都有公式入口 ---
-  const fxButtons = await page.$$eval('[data-map-formula]', (els) => els.length);
-  check('每个映射行都有 ƒx 入口', fxButtons >= 3, `实际 ${fxButtons} 个`);
+  // --- 1. 每行都有映射入口（公式入口收在映射弹层里） ---
+  const mapButtons = await page.$$eval('[data-map-open]', (els) => els.length);
+  check('每个映射行都有映射入口', mapButtons >= 3, `实际 ${mapButtons} 个`);
 
-  // --- 2. 打开公式弹窗 ---
-  await page.click('[data-map-row="k1"] [data-map-formula]');
-  await page.waitForSelector('[data-fx-input]', { timeout: 5000 });
-  await wait(400);
+  // --- 2. 打开映射弹层 → 写公式 ---
+  await openMapping('k1');
+  await page.click('[data-mp-formula]');
+  await page.waitForSelector('[data-fx-input]', { timeout: 8000 });
+  await wait(500);
 
   const dialog = await page.evaluate(() => ({
     title: document.querySelector('.fx-dialog')?.closest('.modal')?.querySelector('.modal-title')?.textContent || '',
@@ -89,18 +97,20 @@ try {
   // --- 4. 应用公式 ---
   await page.click('[data-fx-apply]');
   await wait(700);
+  await page.evaluate(() => (() => { const ms = document.querySelectorAll('.modal'); ms[ms.length - 1]?.querySelector('[data-close]')?.click(); })());
+  await wait(600);
   const applied = await page.evaluate(() => ({
-    chip: document.querySelector('[data-map-row="k1"] .fx-chip .fx-expr')?.textContent || '',
-    fallbackDisabled: document.querySelector('[data-map-row="k1"] [data-map-fallback]')?.disabled,
+    source: document.querySelector('[data-map-row="k1"] .src-text')?.textContent || '',
+    badge: document.querySelector('[data-map-row="k1"] .map-badge')?.textContent || '',
   }));
-  check('应用后行内显示公式摘要',
-    applied.chip.includes('单价'), applied.chip);
-  check('公式列的缺省值输入被禁用', applied.fallbackDisabled === true);
+  check('应用后行内显示公式摘要', applied.source.includes('单价'), applied.source);
+  check('公式列的状态标签是「ƒx 公式」', /公式/.test(applied.badge), applied.badge);
 
   // --- 5. 空公式的错误提示 ---
-  await page.click('[data-map-row="k1"] [data-map-formula]');
-  await page.waitForSelector('[data-fx-input]', { timeout: 5000 });
-  await wait(300);
+  await openMapping('k1');
+  await page.click('[data-mp-formula]');
+  await page.waitForSelector('[data-fx-input]', { timeout: 8000 });
+  await wait(400);
   const reopened = await page.$eval('[data-fx-input]', (el) => el.value);
   check('重新打开时带出已保存的公式', reopened.includes('[单价]'), reopened);
   await page.click('[data-fx-input]', { clickCount: 3 });
@@ -123,10 +133,13 @@ try {
   await page.click('[data-fx-apply]');
   await wait(600);
 
-  // --- 6. 日期格式下拉 ---
-  const fmtExists = await page.$('[data-map-row="k2"] [data-map-datefmt]');
-  check('日期转换列出现格式下拉', !!fmtExists);
-  const options = await page.$$eval('[data-map-row="k2"] [data-map-datefmt] option',
+  // --- 6. 日期格式下拉（在映射弹层里） ---
+  await openMapping('k2');
+  await page.waitForSelector('[data-mp-datefmt]', { timeout: 10000 });
+  await wait(400);
+  const fmtExists = await page.$('[data-mp-datefmt]');
+  check('映射弹层里有日期格式下拉', !!fmtExists);
+  const options = await page.$$eval('[data-mp-datefmt] option',
     (els) => els.map((o) => ({ value: o.value, text: o.textContent.trim() })));
   check('格式下拉包含中文格式选项',
     options.some((o) => o.value === 'YYYY年M月D日'),
@@ -135,8 +148,10 @@ try {
     options.some((o) => o.text === '2026年10月21日'),
     options.map((o) => o.text).slice(0, 3).join(' / '));
 
-  await page.select('[data-map-row="k2"] [data-map-datefmt]', 'YYYY年M月D日');
-  await wait(400);
+  await page.select('[data-mp-datefmt]', 'YYYY年M月D日');
+  await wait(500);
+  await page.evaluate(() => (() => { const ms = document.querySelectorAll('.modal'); ms[ms.length - 1]?.querySelector('[data-close]')?.click(); })());
+  await wait(500);
 
   // --- 7. 生成公式后打开预览，验证日期展示效果 ---
   await page.click('[data-preview]');
