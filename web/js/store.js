@@ -160,18 +160,54 @@ export function templateCategories() {
     .sort((a, b) => b.count - a.count);
 }
 
-/** 方案目标列与模板字段的差异——用于提示「模板已更新，字段对不上了」。 */
+/**
+ * 方案目标列与模板字段的差异——用于提示「模板已更新，字段对不上了」。
+ *
+ * 判定原则（对应评审里的 F5/F6）：
+ * - 按**全部**目标列比，`included === false` 的列也算「方案里有这一列」，
+ *   所以「取消勾选某列」不会被误报成「模板新增了字段」；
+ * - 名字优先、位置其次：先在名字上对齐，剩下的再按模板列号配对，
+ *   配上的算「改名」，没配上的才是真正的增/删；
+ * - 模板在中间插入字段时，后面所有列的位置都会平移，按名字对齐不受影响。
+ */
 export function templateDrift(config) {
   const target = config?.target || {};
   if (target.kind !== 'template' || !target.template_id) return null;
   const template = templateById(target.template_id);
   if (!template) return { missingTemplate: true, added: [], removed: [], renamed: [] };
-  const fieldNames = (template.fields || []).map((f) => f.name);
-  const colNames = (target.columns || []).filter((c) => c.included !== false).map((c) => c.name);
-  const added = fieldNames.filter((n) => !colNames.includes(n));
-  const removed = colNames.filter((n) => !fieldNames.includes(n));
-  if (!added.length && !removed.length) return null;
-  return { missingTemplate: false, added, removed, renamed: [], template };
+  const fields = template.fields || [];
+  const cols = target.columns || [];
+  const nameOfCol = (c) => String(c.name || '').trim();
+  const nameOfField = (f) => String(f?.name || '').trim();
+  const colNames = new Set(cols.map(nameOfCol));
+  const fieldNames = new Set(fields.map(nameOfField));
+
+  const addedFields = fields
+    .map((f, index) => ({ name: nameOfField(f), index }))
+    .filter((f) => f.name && !colNames.has(f.name));
+  const removedCols = cols
+    .filter((c) => c.included !== false && nameOfCol(c) && !fieldNames.has(nameOfCol(c)))
+    .map((c) => ({
+      name: nameOfCol(c),
+      col: c.template_col === null || c.template_col === undefined ? null : Number(c.template_col),
+    }));
+
+  const renamed = [];
+  const pairedAdded = new Set();
+  const pairedRemoved = new Set();
+  removedCols.forEach((removed, ri) => {
+    if (removed.col === null || Number.isNaN(removed.col)) return;
+    const hit = addedFields.find((f) => f.index === removed.col && !pairedAdded.has(f.index));
+    if (!hit) return;
+    renamed.push({ from: removed.name, to: hit.name, col: removed.col });
+    pairedAdded.add(hit.index);
+    pairedRemoved.add(ri);
+  });
+
+  const added = addedFields.filter((f) => !pairedAdded.has(f.index)).map((f) => f.name);
+  const removed = removedCols.filter((_, i) => !pairedRemoved.has(i)).map((c) => c.name);
+  if (!added.length && !removed.length && !renamed.length) return null;
+  return { missingTemplate: false, added, removed, renamed, template };
 }
 
 export function runById(id) {
@@ -203,6 +239,87 @@ export function tableOptionsFor(ids = null) {
   return ids ? all.filter((entry) => ids.includes(entry.table.id)) : all;
 }
 
+/**
+ * 合并方式目录：key 与 backend/fieldmap.py 的 COMBINES 一一对应。
+ * `needsOrder` 为真的方式必须知道「按哪一列排序」，界面上要引导用户选排序列。
+ */
+export const COMBINES = [
+  { key: 'first', label: '取第一个非空值', hint: '按来源顺序，第一个有值的胜出' },
+  { key: 'sum', label: '求和', hint: '把匹配到的多行数值加起来' },
+  { key: 'count', label: '计数', hint: '数一下匹配到多少条记录' },
+  { key: 'max', label: '最大值', hint: '数值或日期取最大' },
+  { key: 'min', label: '最小值', hint: '数值或日期取最小' },
+  { key: 'latest', label: '取最新一条', hint: '按排序列取最新的一条', needsOrder: true },
+  { key: 'concat', label: '拼接', hint: '多个值用顿号连起来，自动去重' },
+];
+
+export const COMBINE_LABELS = COMBINES.reduce((acc, item) => {
+  acc[item.key] = item.label;
+  return acc;
+}, {});
+
+/** 一条来源：哪张表的第几列，取值后怎么处理。集合内的列名不参与运算，只用于界面回显。 */
+export function normalizeSource(src) {
+  if (!src || !src.table_id) return null;
+  const index = Number(src.column_index);
+  return {
+    table_id: src.table_id,
+    column_index: Number.isInteger(index) && index >= 0 ? index : 0,
+    transform: src.transform || 'direct',
+    column_name: src.column_name || '',
+  };
+}
+
+/**
+ * 读出一列的来源链。
+ *
+ * 新结构是 `sources[]`（可多条，按顺序兜底/聚合）；老配置是
+ * `{mode:'table', table_id, column_index}`，等价于「单来源 + 取第一个非空值」，
+ * 所以这里统一折成数组，界面和引擎都不用写两套分支。
+ */
+export function sourcesOf(mapping) {
+  if (!mapping) return [];
+  if (Array.isArray(mapping.sources) && mapping.sources.length) {
+    return mapping.sources.map(normalizeSource).filter(Boolean);
+  }
+  if (mapping.mode === 'table' && mapping.table_id) {
+    const one = normalizeSource(mapping);
+    return one ? [one] : [];
+  }
+  return [];
+}
+
+export function combineOf(mapping) {
+  const key = String(mapping?.combine || '').toLowerCase();
+  return COMBINE_LABELS[key] ? key : 'first';
+}
+
+/** 把任意历史形态的映射整理成当前结构（mode 保留，兼容旧分支判断）。 */
+export function normalizeMapping(raw) {
+  const mapping = { ...(raw || {}) };
+  if (mapping.mode === 'const') {
+    return { ...mapping, mode: 'const', value: mapping.value ?? '', sources: [] };
+  }
+  const sources = sourcesOf(mapping);
+  if (!sources.length) {
+    if (mapping.formula_on === true) return { ...mapping, sources: [] };
+    return { ...mapping, mode: 'blank', sources: [] };
+  }
+  delete mapping.table_id;
+  delete mapping.column_index;
+  return {
+    ...mapping,
+    mode: 'table',
+    sources,
+    combine: combineOf(mapping),
+    separator: mapping.separator || '、',
+    order_by: mapping.order_by && mapping.order_by.table_id ? {
+      table_id: mapping.order_by.table_id,
+      column_index: Number(mapping.order_by.column_index) || 0,
+    } : null,
+  };
+}
+
 export function includedColumns(config) {
   return (config?.target?.columns || []).filter((c) => c.included !== false && String(c.name || '').trim());
 }
@@ -220,7 +337,7 @@ export function mappingSummary(config) {
   let missing = 0;
   for (const col of cols) {
     const m = mappings[col.key];
-    if (m && (m.mode === 'table' || m.mode === 'const')) mapped += 1;
+    if (m && (m.formula_on === true || m.mode === 'const' || sourcesOf(m).length)) mapped += 1;
     else missing += 1;
   }
   return { total: cols.length, mapped, missing };
@@ -261,6 +378,11 @@ export function normalizeConfig(raw, mode = 'join') {
   }));
   cfg.append_tables = Array.isArray(cfg.append_tables) ? cfg.append_tables.filter(Boolean) : [];
   cfg.mappings = cfg.mappings && typeof cfg.mappings === 'object' ? cfg.mappings : {};
+  // 老配置（mode=table + 单条 table_id）在这里就折成来源链，
+  // 界面只面对一种结构，保存时写回的也是新结构（后端仍兼容旧结构）。
+  const normalized = {};
+  for (const [key, value] of Object.entries(cfg.mappings)) normalized[key] = normalizeMapping(value);
+  cfg.mappings = normalized;
   cfg.options = { dedupe: true, skip_empty_key: false, ...(cfg.options || {}) };
   return cfg;
 }

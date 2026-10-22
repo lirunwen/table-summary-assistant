@@ -1459,6 +1459,92 @@ h2.section-title {
 .map-status.off { color: var(--line-strong); }
 .map-status .icon { width: 15px; height: 15px; }
 
+/* ---- 字段映射：行内「取值方式」条（合并方式 + 多来源 + 排序列） ---- */
+.map-chain {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(140px, 1.15fr) minmax(0, 3.2fr);
+  gap: 9px;
+  align-items: center;
+  padding: 7px 13px 9px 13px;
+  background: var(--surface-soft);
+  border-bottom: 1px solid var(--line);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.map-chain .chain-lead {
+  display: inline-flex; align-items: center; gap: 4px;
+  color: var(--faint); font-size: 10px; font-weight: 600;
+}
+.map-chain .chain-lead .icon { width: 11px; height: 11px; }
+.map-chain .chain-body {
+  grid-column: 3 / -1;
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  min-width: 0;
+}
+.map-chain .chain-note { color: var(--faint); font-size: 10px; }
+.map-chain .chain-order {
+  grid-column: 2 / -1;
+  display: flex; align-items: center; gap: 7px;
+}
+.map-chain .chain-order .select { max-width: 260px; }
+.chain-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 4px 2px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 10px;
+  max-width: 260px;
+}
+.chain-x {
+  display: grid; place-items: center;
+  width: 16px; height: 16px; padding: 0;
+  border: 0; border-radius: 999px;
+  background: transparent; color: var(--faint); cursor: pointer;
+}
+.chain-x:hover { background: var(--gold-tint, #fdf3e2); color: var(--gold); }
+.chain-x .icon { width: 10px; height: 10px; }
+.map-chain .chain-add { max-width: 210px; }
+
+/* ---- 预览弹窗：列完成度 ---- */
+.colstat-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 9px 12px;
+  margin-bottom: 12px;
+  background: var(--surface-soft);
+}
+.colstat-panel summary {
+  display: flex; align-items: center; gap: 7px;
+  cursor: pointer; font-size: 11px; font-weight: 600;
+  color: var(--ink); list-style: none;
+}
+.colstat-panel summary::-webkit-details-marker { display: none; }
+.colstat-panel summary .icon { width: 13px; height: 13px; color: var(--brand); }
+.colstat-list {
+  margin-top: 9px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 5px 14px;
+}
+.colstat { display: flex; align-items: center; gap: 7px; font-size: 10.5px; }
+.colstat-name {
+  flex: 0 1 auto; min-width: 74px; max-width: 140px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--muted);
+}
+.colstat-name .req { color: var(--red); margin-left: 2px; }
+.colstat-bar {
+  flex: 1 1 60px; height: 4px; border-radius: 999px;
+  background: var(--line); overflow: hidden;
+}
+.colstat-bar i { display: block; height: 100%; background: #36a078; }
+.colstat.warn .colstat-bar i { background: var(--gold); }
+.colstat.bad .colstat-bar i { background: var(--red); }
+.colstat-val { flex: 0 0 auto; color: var(--faint); font-variant-numeric: tabular-nums; }
+.colstat.bad .colstat-val { color: var(--red); }
+
 /* ---- 字段映射：公式入口与列级日期格式 ---- */
 .map-field { min-width: 0; }
 .field-with-fx { display: flex; align-items: center; gap: 5px; min-width: 0; }

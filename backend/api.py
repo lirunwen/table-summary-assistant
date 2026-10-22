@@ -788,6 +788,8 @@ def create_app(port: int | None = None, host: str = "127.0.0.1") -> Flask:
             "warnings": result["warnings"],
             "lookups": result["lookups"],
             "sources": result["sources"],
+            # 列级填充情况：哪个模板字段还大片空白，一眼看出来
+            "column_stats": result["column_stats"],
             "validation": validate_config(config),
             # 模板字段规则的校验结果：命中了哪些规则、第几行、什么值
             "field_validation": tmplib.validate_config_rows(config, result),

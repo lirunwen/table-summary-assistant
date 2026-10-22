@@ -5,6 +5,7 @@ import {
   attr, confirmDialog, download, emptyState, esc, fmtDate, fmtNumber,
   icon, openModal, timeAgo, toast, typeName, withButtonLoading,
 } from '../ui.js';
+import { openCreateProfileModal } from '../components.js';
 
 const STATUS_META = {
   active: { label: '使用中', cls: 'badge-brand' },
@@ -296,6 +297,7 @@ export default {
             </div>
             <div class="editor-actions">
               <span class="tpl-save-status" data-save-status></span>
+              <button class="btn btn-soft btn-sm" type="button" data-new-profile title="用这个模板新建一个汇总方案">${icon('link')}建汇总方案</button>
               <button class="btn btn-secondary btn-sm" type="button" data-preview>${icon('eye')}预览</button>
               <button class="btn btn-secondary btn-sm" type="button" data-export>${icon('download')}导出</button>
               <button class="btn btn-secondary btn-sm" type="button" data-duplicate>${icon('copy')}复制</button>
@@ -326,6 +328,16 @@ export default {
     }
 
     function bindShell() {
+      view.querySelector('[data-new-profile]')?.addEventListener('click', () => {
+        if (dirty) {
+          toast('模板有未保存的修改，先保存再建方案，免得方案里拿到的还是旧字段。', 'warn', 5000);
+          return;
+        }
+        openCreateProfileModal({
+          templateId: detail.id,
+          onCreated: (profile) => { location.hash = `#/profiles/${encodeURIComponent(profile.id)}`; },
+        });
+      });
       view.querySelectorAll('[data-tab]').forEach((btn) => btn.addEventListener('click', () => {
         if (dirty && !window.confirm('当前修改还没保存，切换标签会丢失。继续吗？')) return;
         tab = btn.dataset.tab;

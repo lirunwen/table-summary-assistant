@@ -5,7 +5,7 @@ import datetime as dt
 import time
 from typing import Any
 
-from . import column_match, db
+from . import column_match, db, fieldmap
 from .formula import Formula, FormulaError, FormulaSyntaxError, compile_formula
 from .readers import read_table_data_cached
 from .templates import template_by_id
@@ -226,19 +226,20 @@ def validate_config(config: dict, registry: Registry | None = None) -> dict:
                 field_owner.setdefault(name, []).append(tid)
 
     unmapped = 0
+    required_missing: list[str] = []
     for col in cols:
         mapping = mappings.get(col.get("key")) or {}
-        m_mode = mapping.get("mode") or "blank"
+        col_name = col.get("name") or col.get("key")
         if _formula_on(mapping):
             text = str(mapping.get("formula") or "")
             if not text.strip():
-                errors.append(f"列「{col['name']}」启用了公式但内容为空，请填写公式或关闭公式。")
+                errors.append(f"列「{col_name}」启用了公式但内容为空，请填写公式或关闭公式。")
             else:
                 try:
                     compiled = compile_formula(text)
                 except FormulaSyntaxError as exc:
                     errors.append(
-                        f"列「{col['name']}」公式语法错误：{exc.message}（第 {exc.pos} 个字符附近）"
+                        f"列「{col_name}」公式语法错误：{exc.message}（第 {exc.pos} 个字符附近）"
                     )
                 else:
                     missing = [r for r in compiled.refs if r not in field_owner]
@@ -246,7 +247,7 @@ def validate_config(config: dict, registry: Registry | None = None) -> dict:
                         sample = "、".join(f"[{m}]" for m in missing[:3])
                         usable = "、".join(list(field_owner)[:8]) or "（暂无可用字段）"
                         errors.append(
-                            f"列「{col['name']}」公式引用了不存在的字段 {sample}。"
+                            f"列「{col_name}」公式引用了不存在的字段 {sample}。"
                             f"可引用：{usable}"
                         )
                     elif mode == "append":
@@ -254,27 +255,53 @@ def validate_config(config: dict, registry: Registry | None = None) -> dict:
                                    if len(field_owner[r]) < len(active_tables)]
                         if partial:
                             warnings.append(
-                                f"列「{col['name']}」公式引用的「{'、'.join(partial[:3])}」"
+                                f"列「{col_name}」公式引用的「{'、'.join(partial[:3])}」"
                                 "只在部分数据表中存在，缺失的行会写入 #REF!。"
                             )
             continue
-        if m_mode == "table":
-            tid = mapping.get("table_id")
-            if not registry.has(tid):
-                errors.append(f"列「{col['name']}」的来源表已失效。")
-                continue
-            idx = _as_index(mapping.get("column_index"))
-            headers = registry.headers(tid)
-            if idx is None or idx >= len(headers):
-                errors.append(f"列「{col['name']}」的来源字段无效。")
-            if tid not in active_tables:
-                warnings.append(f"列「{col['name']}」的来源表未参与本次汇总，将输出缺省值。")
-        elif m_mode == "const":
-            pass
-        else:
+        if fieldmap.is_const(mapping):
+            continue
+        sources = fieldmap.sources_of(mapping)
+        if not sources:
             unmapped += 1
+            if col.get("required"):
+                required_missing.append(str(col_name))
+            continue
+        raw_combine = str(mapping.get("combine") or "").strip().lower()
+        if raw_combine and raw_combine not in fieldmap.COMBINES:
+            warnings.append(
+                f"列「{col_name}」的合并方式「{mapping.get('combine')}」不认识，"
+                "已按「取第一个非空值」处理。"
+            )
+        for src in sources:
+            tid = src["table_id"]
+            if not registry.has(tid):
+                errors.append(f"列「{col_name}」的来源表已失效。")
+                continue
+            headers = registry.headers(tid)
+            if src["column_index"] >= len(headers):
+                errors.append(f"列「{col_name}」的来源字段无效。")
+            if tid not in active_tables:
+                warnings.append(f"列「{col_name}」的来源表未参与本次汇总，将输出缺省值。")
+        if fieldmap.combine_of(mapping) == "latest":
+            order = fieldmap.order_by_of(mapping)
+            if not order:
+                warnings.append(
+                    f"列「{col_name}」用了「取最新一条」但没指定排序列，"
+                    "改为按这一列自身的值比较。"
+                )
+            elif not registry.has(order["table_id"]):
+                warnings.append(f"列「{col_name}」的排序列所在表已失效，改为按这一列自身比较。")
+            elif order["column_index"] >= len(registry.headers(order["table_id"])):
+                warnings.append(f"列「{col_name}」的排序列无效，改为按这一列自身比较。")
     if unmapped:
         warnings.append(f"有 {unmapped} 个目标列尚未配置来源，将以空值或固定值输出。")
+    if required_missing:
+        warnings.append(
+            "模板里标了必填、但还没有配置来源："
+            + "、".join(required_missing[:6])
+            + ("…" if len(required_missing) > 6 else "")
+        )
 
     dkeys = [c.get("key") for c in cols]
     if len(dkeys) != len(set(dkeys)):
@@ -314,21 +341,82 @@ def _apply_transform(value: Any, transform: str | None, ctx: dict | None = None)
     return value
 
 
-def _mapping_value(mapping: dict, row: list[Any] | None, fallback: Any = None,
-                   ctx: dict | None = None):
-    if mapping.get("mode") == "const":
-        value = mapping.get("value")
-    elif mapping.get("mode") == "table" and row is not None:
-        idx = _as_index(mapping.get("column_index"))
-        value = row[idx] if idx is not None and idx < len(row) else None
-    else:
-        value = None
-    value = _apply_transform(value, mapping.get("transform"), ctx)
+def _compile_plan(mapping: dict) -> dict:
+    """把一条映射预编译成取值计划。
+
+    行循环里每列要跑几万次，不能每次都去解析 sources / combine 这些 JSON 结构。
+    """
+    if fieldmap.is_const(mapping):
+        return {
+            "kind": "const",
+            "value": mapping.get("value"),
+            "sources": [],
+            "combine": "first",
+            "separator": fieldmap.DEFAULT_SEPARATOR,
+            "order_by": None,
+        }
+    sources = fieldmap.sources_of(mapping)
+    combine = fieldmap.combine_of(mapping)
+    return {
+        "kind": "sources" if sources else "blank",
+        "sources": sources,
+        "combine": combine,
+        "separator": fieldmap.separator_of(mapping),
+        "order_by": fieldmap.order_by_of(mapping) if combine == "latest" else None,
+    }
+
+
+def _resolve(plan: dict, primary_tid: str, primary_row: list[Any],
+             matched: dict, ctx: dict | None = None) -> Any:
+    """按计划取值：主表用当前行，其他表用匹配到的**所有**行，再按合并方式合成。
+
+    纵向合并时把 `primary_tid` 设成当前表、`matched` 传空字典即可——
+    「只有当前表那一条来源生效」这件事自然由这里表达，不需要两套代码。
+    """
+    kind = plan.get("kind")
+    if kind == "const":
+        return plan.get("value")
+    if kind != "sources":
+        return None
+    combine = plan.get("combine") or fieldmap.DEFAULT_COMBINE
+    order_by = plan.get("order_by")
+    # first / sum / count / concat 不看排序键；max / min / latest 需要
+    needs_key = combine in ("max", "min", "latest")
+    items: list[tuple[Any, Any]] = []
+    for src in plan["sources"]:
+        tid = src["table_id"]
+        idx = src["column_index"]
+        transform = src["transform"]
+        if tid == primary_tid:
+            rows_iter: Any = (primary_row,)
+        else:
+            rows_iter = matched.get(tid) or ()
+        order_idx = None
+        if combine == "latest":
+            # 排序列必须和来源同表，否则退回用本列自身比较
+            if order_by and order_by.get("table_id") == tid:
+                order_idx = order_by["column_index"]
+            else:
+                order_idx = idx
+        for row in rows_iter:
+            raw = row[idx] if idx < len(row) else None
+            value = _apply_transform(raw, transform, ctx)
+            if needs_key:
+                key_src = row[order_idx] if order_idx is not None and order_idx < len(row) else value
+                items.append((value, fieldmap.sort_key(key_src)))
+            else:
+                items.append((value, None))
+    return fieldmap.aggregate(combine, items,
+                              plan.get("separator") or fieldmap.DEFAULT_SEPARATOR)
+
+
+def _finish_value(value: Any, mapping: dict, trim_text: bool) -> Any:
+    """收尾：空值走缺省值，再去首尾空格（与以前 `_mapping_value` 的行为一致）。"""
     if value is None or (isinstance(value, str) and value.strip() == ""):
-        fb = mapping.get("fallback", fallback)
-        if fb is None:
-            return ""
-        return fb
+        fallback = mapping.get("fallback")
+        value = "" if fallback is None else fallback
+    if trim_text and isinstance(value, str):
+        return value.strip()
     return value
 
 
@@ -363,6 +451,12 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
                 f"列「{col['name']}」公式语法错误：{exc.message}（第 {exc.pos} 个字符附近）"
             ) from exc
     need_formula = bool(formulas)
+    # 每列取值计划同样预编译一次：来源链与合并方式在行循环里不再解析
+    plans: dict[str, dict] = {}
+    for col in cols:
+        if col["key"] in formulas:
+            continue
+        plans[col["key"]] = _compile_plan(mappings.get(col.get("key")) or {})
     trim_text = bool(db.get_settings().get("trim_text", True))
     warnings: list[str] = list(check["warnings"])
     unmapped_count = check.get("unmapped", 0)
@@ -413,15 +507,22 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
             if truncated:
                 warnings.append(f"关联表「{registry.label(tid)}」超过行数上限，只读取了前 20 万行。")
             active.append(tid)
-            index: dict[tuple, list[Any]] = {}
-            dup = 0
+            # 一个键可能对应多行：以前只留第一条（等于静默丢数据），
+            # 现在全部留下，由每列的合并方式决定怎么用（取首条 / 求和 / 计数 / 最新…）。
+            index: dict[tuple, list[list[Any]]] = {}
+            dup_rows = 0
             for row in rows:
                 key = _join_key(row, lkeys)
-                if all(key):
-                    if key in index:
-                        dup += 1
-                        continue
-                    index[key] = row
+                if not all(key):
+                    continue
+                bucket = index.get(key)
+                if bucket is None:
+                    index[key] = [row]
+                else:
+                    bucket.append(row)
+                    dup_rows += 1
+            multi_keys = sum(1 for bucket in index.values() if len(bucket) > 1)
+            max_rows = max((len(b) for b in index.values()), default=1)
             matched = 0
             missing = 0
             for row in deduped_rows:
@@ -432,15 +533,21 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
                     missing += 1
             totals["matched"] += matched
             totals["missing"] += missing
-            if dup:
-                warnings.append(f"关联表「{registry.label(tid)}」有 {dup} 个重复键，已取第一条。")
+            if dup_rows:
+                warnings.append(
+                    f"关联表「{registry.label(tid)}」有 {multi_keys} 个键对应多行"
+                    f"（最多 {max_rows} 行）。目标列按各自的合并方式处理，"
+                    "默认「取第一个非空值」只会拿到其中一条。"
+                )
             lookup_stats.append({
                 "table_id": tid,
                 "label": registry.label(tid),
                 "rows": len(rows),
                 "matched": matched,
                 "missing": missing,
-                "duplicates": dup,
+                "duplicates": dup_rows,
+                "multi_keys": multi_keys,
+                "max_rows_per_key": max_rows,
             })
             lookup_data.append({"table_id": tid, "headers": headers, "index": index})
     else:
@@ -464,62 +571,66 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
     output_rows: list[list[Any]] = []
     filled = 0
     empty = 0
+    # 列级填充统计：模板驱动下最常被问的是「哪个字段还有大片空白」
+    col_filled = [0] * len(cols)
+    col_empty = [0] * len(cols)
     ctx: dict = {"ambiguous_dates": 0}
 
-    def resolve_for_join(mapping, primary_row, lookup_rows):
-        tid = mapping.get("table_id")
-        if mapping.get("mode") == "const":
-            return _mapping_value(mapping, None, ctx=ctx)
-        if mapping.get("mode") != "table":
-            return ""
-        if tid == primary_data["table_id"]:
-            return _mapping_value(mapping, primary_row, ctx=ctx)
-        row = lookup_rows.get(tid)
-        if row is None:
-            # 主键为空或未匹配时使用缺省值
-            return _mapping_value({**mapping, "mode": "const", "value": None}, None, ctx=ctx)
-        return _mapping_value(mapping, row, ctx=ctx)
+    def _count(ci: int, value: Any) -> None:
+        nonlocal filled, empty
+        if value is None or (isinstance(value, str) and value == ""):
+            empty += 1
+            col_empty[ci] += 1
+        else:
+            filled += 1
+            col_filled[ci] += 1
 
     if mode == "join":
         # 每行动态计算 lookup 行，避免构建巨大笛卡尔结构
         pkeys = [int(k) for k in (config.get("primary_keys") or [])]
         pheaders = primary_data["headers"]
+        primary_tid = primary_data["table_id"]
         for row in primary_data["rows"]:
             key = _join_key(row, pkeys)
-            matched_rows = {}
+            matched_rows: dict[str, list[list[Any]]] = {}
             if all(key):
                 for ld in lookup_data:
-                    matched_rows[ld["table_id"]] = ld["index"].get(key)
+                    bucket = ld["index"].get(key)
+                    if bucket:
+                        matched_rows[ld["table_id"]] = bucket
             fields = None
             if need_formula:
                 # 主表字段先占位，关联表用 setdefault 补；
                 # 没匹配到关联行时也要把字段名放进去（值为 None），
                 # 否则公式引用它会报 #REF!，而 Excel 里缺失单元格是空值。
+                # 一对多时公式只看第一行——要合计请用字段的合并方式，别写公式。
                 fields = {}
                 for i, h in enumerate(pheaders):
                     fields.setdefault(h, row[i] if i < len(row) else None)
                 for ld in lookup_data:
-                    lk_row = matched_rows.get(ld["table_id"])
+                    bucket = matched_rows.get(ld["table_id"]) or []
+                    lk_row = bucket[0] if bucket else None
                     for i, h in enumerate(ld["headers"]):
                         fields.setdefault(
                             h, lk_row[i] if lk_row is not None and i < len(lk_row) else None
                         )
             row_no = len(output_rows) + 1
             out = []
-            for col in cols:
-                compiled = formulas.get(col.get("key"))
+            for ci, col in enumerate(cols):
+                col_key = col["key"]
+                compiled = formulas.get(col_key)
                 if compiled is not None:
                     value = _formula_value(compiled, fields, col["name"], ctx, row_no)
+                    if trim_text and isinstance(value, str):
+                        value = value.strip()
                 else:
-                    mapping = mappings.get(col.get("key")) or {"mode": "blank"}
-                    value = resolve_for_join(mapping, row, matched_rows)
-                if trim_text and isinstance(value, str):
-                    value = value.strip()
+                    mapping = mappings.get(col_key) or {}
+                    plan = plans.get(col_key) or {"kind": "blank"}
+                    value = _finish_value(
+                        _resolve(plan, primary_tid, row, matched_rows, ctx), mapping, trim_text
+                    )
                 out.append(value)
-                if value is None or (isinstance(value, str) and value == ""):
-                    empty += 1
-                else:
-                    filled += 1
+                _count(ci, value)
             output_rows.append(out)
         totals["input"] = len(primary_data["rows"])
     else:
@@ -536,10 +647,23 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
                         all_fields.append(h)
         for ld in lookup_data:
             headers = ld["headers"]
+            tid = ld["table_id"]
             # 预先建好「列名 → 列下标」索引：以前是 rows × cols 次 headers.index()，
             # 每次线性扫一遍表头；5 万行 × 20 列就是上百万次查找。
             # 索引同时支持「严格同名 → 括号别名」两级匹配（见 column_match）。
             name_pos = column_match.TableMatcher(headers)
+            # 当前表是否为该列指定了来源；没指定才启用「同名列兜底」，
+            # 免得把用户明确配好的来源链冲掉。
+            local: dict[str, tuple[dict, bool, str]] = {}
+            for col in cols:
+                plan = plans.get(col["key"])
+                if plan is None:
+                    continue
+                sources = plan.get("sources") or []
+                has = any(src["table_id"] == tid for src in sources)
+                transform = next((src["transform"] for src in sources if src["table_id"] == tid),
+                                 sources[0]["transform"] if sources else "direct")
+                local[col["key"]] = (plan, has, transform)
             for row in ld["rows"]:
                 fields = None
                 if need_formula:
@@ -548,48 +672,27 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
                         fields.setdefault(h, None)
                 row_no = len(output_rows) + 1
                 out = []
-                for col in cols:
-                    compiled = formulas.get(col.get("key"))
+                for ci, col in enumerate(cols):
+                    col_key = col["key"]
+                    compiled = formulas.get(col_key)
                     if compiled is not None:
                         value = _formula_value(compiled, fields, col["name"], ctx, row_no)
-                        if value is None:
-                            value = ""
                         if trim_text and isinstance(value, str):
                             value = value.strip()
-                        out.append(value)
-                        if value == "":
-                            empty += 1
-                        else:
-                            filled += 1
-                        continue
-                    mapping = mappings.get(col.get("key")) or {"mode": "blank"}
-                    value = None
-                    if mapping.get("mode") == "const":
-                        value = _mapping_value(mapping, None, ctx=ctx)
-                    elif mapping.get("mode") == "table":
-                        if mapping.get("table_id") == ld["table_id"]:
-                            value = _mapping_value(mapping, row, ctx=ctx)
-                        elif auto_by_name:
+                    else:
+                        plan, has, transform = local.get(col_key, ({"kind": "blank"}, False, "direct"))
+                        mapping = mappings.get(col_key) or {}
+                        value = _resolve(plan, tid, row, {}, ctx) if has else None
+                        if value is None and not has and auto_by_name:
                             # 纵向合并时，其他表按同名列自动填充；同名列缺失时
                             # 退回模板列名括号里的备注名（「月薪（税前）」→ 税前）
                             idx, _via = name_pos.resolve(col.get("name"))
                             if idx >= 0:
-                                value = _apply_transform(row[idx], mapping.get("transform"), ctx)
-                            else:
-                                value = _mapping_value(
-                                    {**mapping, "mode": "const", "value": None}, None, ctx=ctx)
-                        else:
-                            value = _mapping_value(
-                                {**mapping, "mode": "const", "value": None}, None, ctx=ctx)
-                    if value is None:
-                        value = ""
-                    if trim_text and isinstance(value, str):
-                        value = value.strip()
+                                value = _apply_transform(row[idx] if idx < len(row) else None,
+                                                         transform, ctx)
+                        value = _finish_value(value, mapping, trim_text)
                     out.append(value)
-                    if value == "":
-                        empty += 1
-                    else:
-                        filled += 1
+                    _count(ci, value)
                 output_rows.append(out)
             totals["input"] += len(ld["rows"])
 
@@ -630,6 +733,17 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
         },
         "lookups": lookup_stats,
         "warnings": warnings,
+        "column_stats": [
+            {
+                "key": col["key"],
+                "name": headers[i],
+                "filled": col_filled[i],
+                "empty": col_empty[i],
+                "empty_rate": round(col_empty[i] / len(output_rows), 4) if output_rows else 0,
+                "required": bool(col.get("required")),
+            }
+            for i, col in enumerate(cols)
+        ],
         "sources": [
             {"table_id": tid, "label": registry.label(tid), "rows": len(registry.data(tid)[1])}
             for tid in active

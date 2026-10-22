@@ -5,6 +5,7 @@ import {
   attr, confirmDialog, debounce, download, emptyState, esc, fmtNumber,
   icon, openModal, pageHead, timeAgo, toast, withButtonLoading,
 } from '../ui.js';
+import { openCreateProfileModal } from '../components.js';
 
 const STATUS_META = {
   active: { label: '使用中', cls: 'badge-brand' },
@@ -69,6 +70,7 @@ function cardHtml(t, selected) {
       </div>
       <div class="tpl-card-actions">
         <a class="btn btn-secondary btn-sm" href="#/templates/${encodeURIComponent(t.id)}">打开 ${icon('arrow-right', 'icon-sm')}</a>
+        <button class="btn btn-soft btn-sm" type="button" data-new-profile="${attr(t.id)}" title="用这个模板新建汇总方案">${icon('link')}建方案</button>
         <button class="icon-btn" type="button" data-dup="${attr(t.id)}" title="复制模板" aria-label="复制模板">${icon('copy')}</button>
         <button class="icon-btn" type="button" data-export="${attr(t.id)}" title="导出定义" aria-label="导出定义">${icon('download')}</button>
         <button class="icon-btn danger" type="button" data-del="${attr(t.id)}" title="删除模板" aria-label="删除模板">${icon('trash')}</button>
@@ -484,6 +486,15 @@ export default {
 
     // 卡片上的操作（事件委托）
     view.onclick = async (event) => {
+      const makeProfile = event.target.closest('[data-new-profile]');
+      if (makeProfile) {
+        // 从模板直接开一个方案：省掉「先进方案列表 → 新建 → 选模板」三步
+        openCreateProfileModal({
+          templateId: makeProfile.dataset.newProfile,
+          onCreated: (profile) => { location.hash = `#/profiles/${encodeURIComponent(profile.id)}`; },
+        });
+        return;
+      }
       const dup = event.target.closest('[data-dup]');
       if (dup) {
         try {

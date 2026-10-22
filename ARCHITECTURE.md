@@ -152,21 +152,38 @@ settings(key, value JSON)
   "mappings": {
     "c_x1": {
       "mode": "table",
-      "table_id": "s_ab12::s0",
-      "column_index": 0,
-      "column_name": "工号",
-      "transform": "trim",
+      "sources": [
+        { "table_id": "s_ab12::s0", "column_index": 0, "transform": "trim" }
+      ],
+      "combine": "first",
       "fallback": ""
     },
     "c_x2": {
       "mode": "table",
-      "table_id": "s_ab12::s0",
-      "column_index": 2,
-      "column_name": "业务日期",
-      "transform": "date",
+      "sources": [
+        { "table_id": "s_cd34::s0", "column_index": 3, "transform": "date" }
+      ],
+      "combine": "latest",
+      "order_by": { "table_id": "s_cd34::s0", "column_index": 5 },
       "date_format": "YYYY年M月D日"
     },
     "c_x3": {
+      "mode": "table",
+      "sources": [
+        { "table_id": "s_cd34::s0", "column_index": 2, "transform": "number" }
+      ],
+      "combine": "sum"
+    },
+    "c_x4": {
+      "mode": "table",
+      "sources": [
+        { "table_id": "s_ab12::s0", "column_index": 7, "transform": "direct" },
+        { "table_id": "s_cd34::s0", "column_index": 1, "transform": "direct" }
+      ],
+      "combine": "first",
+      "separator": "、"
+    },
+    "c_x5": {
       "mode": "table",
       "formula_on": true,
       "formula": "=IFERROR([单价]*[数量],0)",
@@ -179,22 +196,32 @@ settings(key, value JSON)
 
 映射有三种模式：
 
-- `table`：指定数据表 + 列索引，可叠加处理方式与缺省值；
+- `table`：指定**来源链**（至少一条 `sources`），可叠加处理方式、合并方式与缺省值；
 - `const`：整列固定值；
 - `blank`：显式留空。
 
-每条映射还带两个可选的列级增强字段，二者互不排斥但公式优先：
+`table` 模式下每条来源是 `{table_id, column_index, transform}`，数组顺序即优先级。
+`mode: "table"` 保留下来只为兼容前端已有分支与老配置，判定「有没有来源」一律看 `sources`。
+
+**老配置兼容**：`{mode:"table", table_id, column_index, transform}` 被读成
+「单来源链 + `combine: first`」（见 `fieldmap.sources_of`），所以 0.3.x 的方案不用迁移；
+`config.version` 也没有升——结构是向后兼容地扩字段，不是破坏性变更。
+
+每条映射还带几个可选的列级增强字段，公式优先于来源链：
 
 | 字段 | 类型 | 作用 |
 | --- | --- | --- |
+| `combine` | `string` | 多行/多来源的合并方式，见 §6.7；非法值回落 `first` 并给警告 |
+| `order_by` | `{table_id, column_index}` | 仅 `combine: "latest"` 用；必须和某条来源同表，否则退回按本列自身比较 |
+| `separator` | `string` | 仅 `combine: "concat"` 用，默认 `、` |
 | `formula_on` | `bool` | 该列是否启用公式。只有显式 `true` 才生效，老方案缺省即关闭 |
 | `formula` | `string` | 公式正文，如 `=[单价]*[数量]`；`formula_on` 为真但正文为空会直接报配置错误 |
-| `date_format` | `string` | 日期列的展示格式键（见 §7），仅在 `transform` 为 `date` 或列类型为 `date` 时参与写入 |
+| `date_format` | `string` | 日期列的展示格式键（见 §7），仅在首条来源的 `transform` 为 `date` 或列类型为 `date` 时参与写入 |
 
 `formula_on` 与 `formula` 拆成两个字段，是为了让「关掉公式但留住内容」不丢配置：
 用户在界面上取消勾选公式后，`formula` 仍留在 JSON 里，下次打开还能接着改。
 
-启用公式的列会**跳过** `mode` / `table_id` / `column_index` / `transform`：
+启用公式的列会**跳过** `sources` / `combine` / `transform`：
 取值完全由公式决定，来源表只用来提供可引用的字段名（见 §6.4）。
 
 ## 6. 汇总引擎
@@ -408,6 +435,61 @@ Excel 里缺失的单元格是空的，不是错误。`append` 路径先算所�
 
 `origin='fields'` 的模板在生成 xlsx 时给 `enum` / `bool` 字段挂 `DataValidation` 下拉，
 让 Excel 里手填也不会超出范围；`upload` 模板不动用户自己的数据验证。
+
+### 6.7 来源链与合并方式（多源、一对多）
+
+数据模板只描述「表长什么样」，**行基准永远是当月数据表**：关联模式看主表行数，
+纵向合并看每张表的行数。模板里即使有示例数据也不参与计算——这条边界是 0.4.0 定下来的。
+
+一列的取值分两段，规则集中在新模块 `backend/fieldmap.py`：
+
+```
+sources[]（有序）  →  每条来源从「本行/匹配到的所有行」取值 + transform
+                   →  items[(值, 比较键)]
+                   →  aggregate(combine, items)
+```
+
+**为什么关联表的索引要存多行**。旧实现 `index[key] = row` 只留第一条，一个人有三条加班
+记录时另外两条被静默丢掉，只在警告里说「已取第一条」。现在 `index[key] = [row, ...]`，
+由每列自己的 `combine` 决定用哪条、用几条。代价是 memory 里多存几行引用的指针
+（行本身是同一批 list 对象，不复制），换来「求和 / 计数 / 取最新」这些本来就该有的能力。
+
+**七种合并方式**（`fieldmap.COMBINES`，前端 store.js 的 `COMBINES` 与之一一对应）：
+
+| key | 语义 | 需要排序键 |
+| --- | --- | --- |
+| `first` | 按来源链顺序，第一个非空值胜出（默认） | 否 |
+| `sum` | 数值求和，非数值与空值跳过 | 否 |
+| `count` | 数有值的条数 | 否 |
+| `max` / `min` | 按 `sort_key` 比大小，空值不参与 | 否 |
+| `latest` | 按 `order_by` 排序后取最后一条的**本列值** | 是 |
+| `concat` | 去重保序，用 `separator` 连接 | 否 |
+
+`latest` 与 `max` 的区别值得单独说：`max` 是「这一列自己取最大」（最大日期）；
+`latest` 是「按排序列找到最新那行，再取这一行里的**别的列**」（最近一次就诊的医院）。
+所以 `order_by` 必须和来源同表，否则语义不成立，引擎退回 `order_idx = idx` 并在
+`validate_config` 里给 warning。
+
+`sort_key` 把值折成 `(等级, 可比较值)`：空 0 / 日期 1（转成 `date` 对象）/ 数值 2 / 文本 3。
+混着日期和文本时等级不同也能比较，不会因为 `str` 与 `int` 相减抛 `TypeError`。
+
+**纵表合并的「本地来源」**。append 模式下原来靠 `auto_by_name` 全表按列名猜；
+0.4.0 起先看该列有没有指定**当前这张表**的来源（`local[col_key]`），有就用来源链
+（`primary_tid` 设成当前表、`matched` 传空字典，同一套 `_resolve` 即可表达
+「只有当前表那条来源生效」），没有才走同名列兜底。
+
+**预编译**。行循环里每列要跑几万次，所以 `_compile_plan()` 在进循环前把 mapping 折成
+`{kind, sources, combine, separator, order_by}`，循环里只做下标取值与聚合，
+不再反复解析 JSON 结构。
+
+**列级统计**。`build()` 顺带累计 `col_filled / col_empty`，返回：
+
+```json
+[{ "key": "c1", "name": "手机号", "filled": 12, "empty": 3, "empty_rate": 0.2, "required": true }]
+```
+
+`/api/preview` 透出为 `column_stats`，预览弹窗用它渲染「列完成度」（有空的列排在前面、
+必填缺值标红）。这解决的是模板驱动下最高频的一问：**哪个字段还没填上**。
 
 ## 7. 模板写入
 
@@ -688,10 +770,21 @@ data/
   模板列「月薪（税前）」真的能从「税前」那一列取到数。
 - `tests/ui/check-alias-mapping.mjs`：9 项，覆盖「按列名匹配」按钮的两级命中、映射行上
   的别名提示、提示文案区分同名/备注名、结果落库、手改字段后提示消失。
+- `tests/test_combine.py`：18 条，盯住来源链与合并方式——七种合并方式的边界（空值不参与
+  最大最小、`concat` 去重保序、`count` 不数空、`sum` 跳过非数值）、新旧两种配置结构的读取、
+  多来源兜底、一对多聚合、`latest` 取「排序列最新那行的本列值」、纵向合并里「每张表用
+  自己那条来源」、未知 `combine` 降级加警告、`column_stats`、必填无来源的提示、
+  多行警告里出现 `multi_keys / max_rows_per_key`。
+- `tests/ui/check-mapping-chain.mjs`：19 项，覆盖段落顺序（目标表 → 字段映射 → 数据来源）
+  与编号、每列都渲染取值条、多来源 chip 与合并方式回显、`latest` 的排序列下拉、
+  预览里的列完成度、切合并方式后说明文字跟着变、追加来源、**取消勾选一列不再误报
+  模板差异**、模板卡片「建方案」预填与模板锁定。
 - `tests/ui_shot.py`：开发期用 Chrome DevTools Protocol 截图与检查浏览器异常。
 - `samples/make_samples.py`：生成可复现的示例文件。
 
-当前基线：`pytest tests -q` → **181 passed**；五个 UI 巡检脚本 81/81 通过。
+当前基线：`pytest tests -q` → **199 passed**；五个 UI 巡检脚本共 91 项断言
+（`check-mapping-chain` 19 项本机已跑通，其余四项沿用 0.3.1 的结论——
+`check-app-control` 会真的关掉被测服务，需独立数据目录且最后跑）。
 
 ## 14.1 发布流水线
 

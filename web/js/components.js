@@ -150,23 +150,25 @@ export function applyTemplateToTarget(config, template, sheet) {
   return config;
 }
 
-export function openCreateProfileModal({ onCreated } = {}) {
+export function openCreateProfileModal({ onCreated, templateId: presetTemplateId = '', name: presetName = '' } = {}) {
   const templates = state.templates || [];
   let mode = 'join';
   // 输出方式三选一：新建空白表 / 用已有模板 / 上传新模板。
   // 默认值很关键——已经上传过模板就默认选中最近一份，
   // 否则用户填完名字直接点「创建」，模板永远不会生效。
-  let outputMode = templates.length ? 'template' : 'blank';
-  let templateId = templates[0]?.id || '';
-  let sheetName = templates[0]?.meta?.sheets?.[0]?.name || '';
+  // 从模板库点进来时（presetTemplateId）直接锁定那份模板，省掉一次选择。
+  const preset = presetTemplateId ? templates.find((t) => t.id === presetTemplateId) : null;
+  let outputMode = preset || templates.length ? 'template' : 'blank';
+  let templateId = preset?.id || templates[0]?.id || '';
+  let sheetName = (preset || templates[0])?.meta?.sheets?.[0]?.name || '';
   const ref = openModal({
-    title: '新建汇总方案',
+    title: preset ? `用「${preset.name}」建汇总方案` : '新建汇总方案',
     sub: '一个方案对应一项固定的汇总工作，可以反复使用。',
     size: 'modal-lg',
     body: `
       <div class="field">
         <label class="field-label" for="np-name">方案名称 <span class="req">*</span></label>
-        <input class="input" id="np-name" maxlength="80" placeholder="例如：10 月人员信息汇总" autocomplete="off">
+        <input class="input" id="np-name" maxlength="80" placeholder="例如：10 月人员信息汇总" autocomplete="off" value="${attr(presetName || (preset ? `${preset.name} 汇总` : ''))}">
         <div class="field-hint">建议写清楚用途和周期，方便同事辨认。</div>
       </div>
       <div class="field mt-18">
