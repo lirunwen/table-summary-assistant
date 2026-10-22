@@ -287,9 +287,20 @@ export default {
       if (structural) paint(true);
     }
 
-    function autoMap({ silent = false } = {}) {
+    /**
+     * 按列名匹配来源列。
+     *
+     * 规则（严格同名 → 括号备注名）统一由后端 `backend/column_match.py` 实现，
+     * 前端只负责收集「还没配置的列」和「参与匹配的表」（数组顺序即优先级），
+     * 不在这里再写一套，避免两边规则慢慢跑偏。
+     */
+    async function autoMap({ silent = false } = {}) {
       const entries = activeEntries();
-      let count = 0;
+      if (!entries.length) {
+        if (!silent) toast('先选择主表或要合并的数据表，再来匹配字段。', 'warn');
+        return 0;
+      }
+      const pending = [];
       for (const col of includedColumns(config)) {
         const existing = config.mappings[col.key];
         if (existing && existing.mode === 'const') continue;
@@ -299,23 +310,74 @@ export default {
           const headers = tableHeaders(existing.table_id);
           if (headers.length && Number(existing.column_index) >= 0 && Number(existing.column_index) < headers.length) continue;
         }
-        for (const entry of entries) {
-          const idx = (entry.table.headers || []).indexOf(col.name);
-          if (idx >= 0) {
-            config.mappings[col.key] = {
-              mode: 'table', table_id: entry.table.id, column_index: idx,
-              column_name: entry.table.headers[idx], transform: 'direct', fallback: '',
-            };
-            count += 1;
-            break;
-          }
+        pending.push({ key: col.key, name: col.name });
+      }
+      if (!pending.length) {
+        if (!silent) toast('所有列都已经指定了来源，没有需要匹配的列。', 'info');
+        return 0;
+      }
+
+      const tables = entries.map((entry) => ({ id: entry.table.id, headers: entry.table.headers || [] }));
+      let result;
+      try {
+        result = await api.matchColumns(pending, tables);
+      } catch (err) {
+        if (!silent) toast(`列名匹配失败：${err.message || err}`, 'error');
+        return 0;
+      }
+
+      let byName = 0;
+      let byAlias = 0;
+      for (const hit of result.matches || []) {
+        if (!hit.table_id) continue;
+        const old = config.mappings[hit.key] || {};
+        const mapping = {
+          mode: 'table',
+          table_id: hit.table_id,
+          column_index: hit.column_index,
+          column_name: hit.column_name || '',
+          transform: old.transform || 'direct',
+          fallback: old.fallback || '',
+        };
+        if (hit.via === 'alias') {
+          // 记下是靠哪个括号备注名命中的，映射行里会显示出来，方便核对
+          mapping.matched_alias = hit.alias || '';
+          byAlias += 1;
+        } else {
+          byName += 1;
+        }
+        config.mappings[hit.key] = mapping;
+      }
+
+      const count = byName + byAlias;
+      if (!silent) {
+        if (!count) toast('没有找到对得上的来源字段，可以手动选择。', 'info');
+        else {
+          const parts = [];
+          if (byName) parts.push(`同名 ${byName} 列`);
+          if (byAlias) parts.push(`括号备注名 ${byAlias} 列`);
+          toast(`已匹配 ${count} 列（${parts.join('，')}），已有配置保持不变。`, 'ok');
         }
       }
-      if (!silent) {
-        if (count) toast(`已按列名匹配 ${count} 列，已有配置保持不变。`, 'ok');
-        else toast('没有找到同名的来源字段，可以手动选择。', 'info');
-      }
       return count;
+    }
+
+    /** 手选来源表后同名没命中时，再问一次后端要不要用括号备注名。失败就保持第一列。 */
+    function fillByAlias(key, columnName, tableId, headers) {
+      api.matchColumns([{ key, name: columnName }], [{ id: tableId, headers }])
+        .then((res) => {
+          const hit = (res.matches || [])[0];
+          const current = config.mappings[key];
+          // 等待期间用户可能换了来源表或手选了字段，这几种情况都不该覆盖
+          if (!hit || hit.via !== 'alias' || !current) return;
+          if (current.mode !== 'table' || current.table_id !== tableId) return;
+          if (Number(current.column_index) !== 0) return;
+          current.column_index = hit.column_index;
+          current.column_name = hit.column_name || '';
+          current.matched_alias = hit.alias || '';
+          markDirty(true);
+        })
+        .catch(() => { /* 猜不出来就留着第一列，用户手选即可 */ });
     }
 
     function syncLookupKeys() {
@@ -765,6 +827,14 @@ export default {
         </section>`;
     }
 
+    function aliasHint(mapping) {
+      const alias = mapping?.mode === 'table' ? mapping.matched_alias : '';
+      // 来源字段后来被改过就别再显示旧提示，免得误导
+      if (!alias || (mapping.column_name || '') !== alias) return '';
+      return `<div class="map-alias" title="模板列名的严格名称在来源表里没有，按括号里的备注名匹配到这里">
+        ${icon('info')}<span>括号备注名「${esc(alias)}」</span></div>`;
+    }
+
     function renderMappingRow(col, entries) {
       const mapping = config.mappings[col.key];
       const mode = mapping?.mode || 'blank';
@@ -793,7 +863,8 @@ export default {
                 ? `<div class="field-with-fx">
                      <select class="select select-sm" data-map-field="${attr(col.key)}">${fieldOptions(col, mapping)}</select>
                      <button class="fx-btn" type="button" data-map-formula="${attr(col.key)}" title="用 Excel 公式计算这一列">ƒx</button>
-                   </div>`
+                   </div>
+                   ${aliasHint(mapping)}`
                 : mode === 'const'
                   ? `<input class="input input-sm" value="${attr(mapping?.value || '')}" data-map-const="${attr(col.key)}" placeholder="固定内容">`
                   : `<span class="tiny faint">该列输出为空</span>`}
@@ -1125,9 +1196,15 @@ export default {
       });
 
       // 映射
-      view.querySelector('[data-auto-map]')?.addEventListener('click', () => {
-        const count = autoMap();
-        if (count) markDirty(true);
+      view.querySelector('[data-auto-map]')?.addEventListener('click', async (event) => {
+        const btn = event.currentTarget;
+        btn.disabled = true;
+        try {
+          const count = await autoMap();
+          if (count) markDirty(true);
+        } finally {
+          btn.disabled = false;
+        }
       });
       view.querySelectorAll('[data-map-source]').forEach((select) => {
         select.addEventListener('change', () => {
@@ -1143,13 +1220,16 @@ export default {
           } else if (value.startsWith('table:')) {
             const tableId = value.slice(6);
             const headers = tableHeaders(tableId);
-            let index = headers.indexOf(col.name);
-            if (index < 0) index = 0;
+            // 先按同名猜一个默认字段；猜不到就落到第一列，再异步问一次后端
+            // （括号备注名的规则只在 column_match 里实现，前端不复刻）
+            const guess = headers.indexOf(col.name);
+            const index = guess >= 0 ? guess : 0;
             config.mappings[key] = {
               mode: 'table', table_id: tableId, column_index: index,
               column_name: headers[index] || '',
               transform: old.transform || 'direct', fallback: old.fallback || '',
             };
+            if (guess < 0) fillByAlias(key, col.name, tableId, headers);
           }
           markDirty(true);
         });
@@ -1163,7 +1243,10 @@ export default {
           const index = Number(select.value);
           mapping.column_index = index;
           mapping.column_name = headers[index] || '';
-          markDirty(false);
+          // 用户手选了字段，「靠括号备注名命中」的标记就不成立了，重绘一次把提示收掉
+          const hadAlias = !!mapping.matched_alias;
+          delete mapping.matched_alias;
+          markDirty(hadAlias);
           paintSaveStatus();
         });
       });
@@ -1298,9 +1381,8 @@ export default {
             const sheet = sheets.find((s) => s.name === btn.dataset.pickSheet);
             if (!sheet) return;
             applyTemplateToTarget(config, template, sheet);
-            autoMap({ silent: true });
+            autoMap({ silent: true }).then(() => markDirty(true));
             ref.close();
-            markDirty(true);
             toast(`已应用模板「${template.name}」的工作表「${sheet.name}」。`, 'ok');
           });
         });
@@ -1327,8 +1409,7 @@ export default {
         const sheet = (template.meta?.sheets || template.sheets || []).find((s) => s.name === config.target.sheet)
           || { name: config.target.sheet, header_row: config.target.header_row, headers: (template.fields || []).map((f) => f.name) };
         applyTemplateToTarget(config, template, sheet);
-        autoMap({ silent: true });
-        markDirty(true);
+        autoMap({ silent: true }).then(() => markDirty(true));
         toast(`已按模板「${template.name}」同步 ${config.target.columns.length} 个目标列。`, 'ok');
       });
     }
@@ -1442,9 +1523,8 @@ export default {
           const existing = new Set(config.target.columns.map((c) => c.name));
           config.target.columns.push(...newCols.filter((c) => !existing.has(c.name)));
         }
-        autoMap({ silent: true });
+        autoMap({ silent: true }).then(() => markDirty(true));
         ref.close();
-        markDirty(true);
         toast(`已导入 ${newCols.length} 个列名。`, 'ok');
       });
     }

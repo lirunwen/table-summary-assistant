@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 
 from flask import Flask, jsonify, request, send_file, send_from_directory
 
-from . import db
+from . import column_match, db
 from .config import (
     APP_NAME,
     APP_SUBTITLE,
@@ -633,6 +633,36 @@ def create_app(port: int | None = None, host: str = "127.0.0.1") -> Flask:
         return {"profile": _public_profile(new_row)}
 
     # ---- 字段公式：速查 / 校验 / 试算 -------------------------------------
+    @app.post("/api/match-columns")
+    @api_route
+    def match_columns():
+        """按列名自动匹配来源列：严格同名优先，未命中时用模板列名括号里的备注名。
+
+        规则全部在 `column_match` 里，前端不再自己实现一套，避免两边慢慢跑偏。
+        请求：`{columns: [{key, name}], tables: [{id, headers}]}`，
+        其中 `tables` 的顺序就是优先级（主表在前，关联表按添加顺序）。
+        """
+        payload = request.get_json(silent=True) or {}
+        columns = payload.get("columns") or []
+        tables = payload.get("tables") or []
+        if not isinstance(columns, list) or not isinstance(tables, list):
+            raise UserError("匹配请求格式不正确。")
+        tables = [t for t in tables if isinstance(t, dict)]
+        header_lists = [[str(h) for h in (t.get("headers") or [])] for t in tables]
+        matches = column_match.match_columns(columns, header_lists)
+        for item in matches:
+            pos = item.pop("table_pos")
+            item["table_id"] = tables[pos].get("id") if pos < len(tables) else None
+        return {
+            "matches": matches,
+            "stats": {
+                "checked": len(columns),
+                "matched": len(matches),
+                "by_name": sum(1 for m in matches if m["via"] == column_match.NAME),
+                "by_alias": sum(1 for m in matches if m["via"] == column_match.ALIAS),
+            },
+        }
+
     @app.get("/api/formula/help")
     @api_route
     def formula_help():

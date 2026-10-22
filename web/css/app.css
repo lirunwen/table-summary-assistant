@@ -1463,6 +1463,13 @@ h2.section-title {
 .map-field { min-width: 0; }
 .field-with-fx { display: flex; align-items: center; gap: 5px; min-width: 0; }
 .field-with-fx .select { flex: 1 1 auto; min-width: 0; }
+/* 靠模板列名括号里的备注名命中时，在来源字段下方标一行，方便核对 */
+.map-alias {
+  display: flex; align-items: center; gap: 4px; margin-top: 3px;
+  color: #9a7b2f; font-size: 9.5px; line-height: 1.3;
+}
+.map-alias .icon { width: 10px; height: 10px; flex: 0 0 auto; }
+.map-alias span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fx-btn {
   flex: 0 0 auto;
   width: 27px;

@@ -157,6 +157,13 @@ export const api = {
     return request('/api/formula/help');
   },
 
+  matchColumns(columns, tables) {
+    return request('/api/match-columns', {
+      method: 'POST',
+      body: { columns, tables },
+    });
+  },
+
   formulaCheck(formula, tableIds) {
     return request('/api/formula/check', {
       method: 'POST',

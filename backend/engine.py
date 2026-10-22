@@ -5,7 +5,7 @@ import datetime as dt
 import time
 from typing import Any
 
-from . import db
+from . import column_match, db
 from .formula import Formula, FormulaError, FormulaSyntaxError, compile_formula
 from .readers import read_table_data_cached
 from .templates import template_by_id
@@ -536,9 +536,10 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
                         all_fields.append(h)
         for ld in lookup_data:
             headers = ld["headers"]
-            # 预先建好「列名 → 列下标」映射：以前是 rows × cols 次 headers.index()，
+            # 预先建好「列名 → 列下标」索引：以前是 rows × cols 次 headers.index()，
             # 每次线性扫一遍表头；5 万行 × 20 列就是上百万次查找。
-            name_pos = {h: i for i, h in enumerate(headers)}
+            # 索引同时支持「严格同名 → 括号别名」两级匹配（见 column_match）。
+            name_pos = column_match.TableMatcher(headers)
             for row in ld["rows"]:
                 fields = None
                 if need_formula:
@@ -569,8 +570,9 @@ def build(config: dict, preview_limit: int | None = None, include_rows: bool = T
                         if mapping.get("table_id") == ld["table_id"]:
                             value = _mapping_value(mapping, row, ctx=ctx)
                         elif auto_by_name:
-                            # 纵向合并时，其他表按同名列自动填充
-                            idx = name_pos.get(col.get("name"), -1)
+                            # 纵向合并时，其他表按同名列自动填充；同名列缺失时
+                            # 退回模板列名括号里的备注名（「月薪（税前）」→ 税前）
+                            idx, _via = name_pos.resolve(col.get("name"))
                             if idx >= 0:
                                 value = _apply_transform(row[idx], mapping.get("transform"), ctx)
                             else:
