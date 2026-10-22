@@ -666,6 +666,9 @@ def create_app(port: int | None = None, host: str = "127.0.0.1") -> Flask:
         return {
             "matches": matches,
             "candidates": candidates,
+            # 每一列实际拿去匹配的名字（含括号时是括号里的备注名），
+            # 界面据此说明"这一列只按备注名找"
+            "names": result.get("names") or {},
             "stats": {
                 "checked": len(columns),
                 "matched": len(matches),

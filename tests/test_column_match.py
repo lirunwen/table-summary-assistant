@@ -60,29 +60,44 @@ def test_alias_dedupes():
     assert cm.bracket_aliases("工号（工号）（工号）") == ["工号"]
 
 
-def test_candidates_strict_first_then_aliases():
-    assert cm.candidate_names("月薪（税前）") == [("月薪（税前）", cm.NAME), ("税前", cm.ALIAS)]
-    # 严格名带着括号整体参与比较，别名是括号里的内容，两者都要留着
-    assert cm.candidate_names("工号（工号）") == [("工号（工号）", cm.NAME), ("工号", cm.ALIAS)]
+def test_candidates_use_alias_only_when_bracketed():
+    """带括号的列只用括号里的备注名；不带括号的才用列名本身。"""
+    assert cm.candidate_names("月薪（税前）") == [("税前", cm.ALIAS, "税前")]
+    # 括号里的名字与外面重复也只留一条
+    assert cm.candidate_names("工号（工号）") == [("工号", cm.ALIAS, "工号")]
+    # 不带括号 → 列名本身，层级是 exact
+    assert cm.candidate_names("姓名") == [("姓名", cm.EXACT, "姓名")]
     assert cm.candidate_names("") == []
+
+
+def test_target_match_names_follows_the_same_rule():
+    assert cm.target_match_names("姓名（联系人）") == ["联系人"]
+    assert cm.target_match_names("姓名") == ["姓名"]
+    assert cm.target_match_names("") == []
 
 
 # ---------- 匹配优先级 ----------
 
-def test_strict_name_wins_over_alias():
-    # 只有别名能命中时才走别名
+def test_alias_name_wins_over_whole_column_name():
+    """括号备注名优先：源表里同时有「税前」和「月薪（税前）」时取的是「税前」。"""
     match = cm.resolve("月薪（税前）", [["税前", "姓名"]])
     assert (match.table_pos, match.column_index, match.via, match.alias) == (0, 0, cm.ALIAS, "税前")
-    # 同名列存在时严格名优先，不会被别名抢走
+    # 数据源里还有一列跟目标列整串一样，也不能去撞它——括号里才是权威名
     match = cm.resolve("月薪（税前）", [["税前", "月薪（税前）"]])
-    assert (match.column_index, match.via) == (1, cm.NAME)
+    assert (match.column_index, match.via) == (0, cm.ALIAS)
 
 
-def test_strict_name_in_later_table_beats_alias_in_first():
-    """候选优先于表：严格名跑遍所有表，才轮到别名。"""
-    tables = [["税前"], ["月薪（税前）"]]
+def test_bracketed_column_never_falls_back_to_whole_name():
+    """备注名找不到时不退回整串列名——否则括号备注就白写了，宁可留空让人选。"""
+    assert cm.resolve("姓名（联系人）", [["姓名"]]) is None
+    assert cm.resolve("姓名（联系人）", [["姓名", "手机号"]]) is None
+
+
+def test_alias_name_in_later_table_beats_first_table():
+    """候选优先于表：备注名跑遍所有表才停。"""
+    tables = [["别的"], ["税前"]]
     match = cm.resolve("月薪（税前）", tables)
-    assert (match.table_pos, match.via) == (1, cm.NAME)
+    assert (match.table_pos, match.via) == (1, cm.ALIAS)
 
 
 def test_alias_falls_back_to_first_table_with_match():

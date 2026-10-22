@@ -118,7 +118,9 @@ try {
     };
   });
   check('映射弹层里列出了候选来源列', dialog.count > 0, JSON.stringify(dialog.sample));
-  check('弹层提示说明了没有同名命中', /没有能对上|候选/.test(dialog.hint || ''), dialog.hint);
+  // 目标列「备注（暂缺）」带括号 → 提示要说明"只按括号里的备注名找"
+  check('弹层提示说明了带括号的列只按备注名找',
+    /带括号备注/.test(dialog.hint || '') && /暂缺/.test(dialog.hint || ''), dialog.hint);
 
   // 从候选里选一列 → 映射生效，状态变「手动」
   const candidateValue = await page.evaluate(() => {

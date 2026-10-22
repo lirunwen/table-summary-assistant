@@ -38,12 +38,22 @@ def test_exact_matches_written_differently():
         assert m.column_index == 0
 
 
-def test_exact_wins_over_alias_and_similar():
-    """精确命中的优先级最高：源表同时有「税前」和「月薪（税前）」时取精确的那个。"""
+def test_bracket_alias_wins_over_whole_column_name():
+    """括号备注名优先：源表同时有「税前」和「月薪（税前）」时取的是「税前」。"""
     m = cm.resolve("月薪（税前）", [["税前", "月薪（税前）"]])
     assert m is not None
-    assert m.via == cm.EXACT
-    assert m.column_index == 1
+    assert m.via == cm.ALIAS
+    assert m.column_index == 0
+    assert m.alias == "税前"
+
+
+def test_bracketed_column_does_not_match_whole_name():
+    """带括号的列不拿整串列名去撞：撞上了也是错配，宁可留空。"""
+    assert cm.resolve("姓名（联系人）", [["姓名"]]) is None
+    # 有备注名时按备注名命中，不管整串列名在不在
+    m = cm.resolve("姓名（联系人）", [["姓名", "联系人"]])
+    assert m is not None and m.via == cm.ALIAS
+    assert m.column_index == 1 and m.alias == "联系人"
 
 
 def test_alias_still_works_when_no_exact():
@@ -51,6 +61,13 @@ def test_alias_still_works_when_no_exact():
     assert m is not None
     assert m.via == cm.ALIAS
     assert m.alias == "税前"
+
+
+def test_similarity_uses_the_alias_name_not_the_whole_column():
+    """相似度比的是有效匹配名：有括号时拿备注名去比。"""
+    m = cm.resolve("手机号（号码）", [["手机号码"]])
+    assert m is not None
+    assert m.via == cm.SIMILAR
 
 
 # ---------- 第二层：相似度 ----------

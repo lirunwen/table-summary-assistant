@@ -1389,10 +1389,22 @@ export default {
         });
       });
       view.querySelectorAll('[data-map-open]').forEach((btn) => {
-        btn.addEventListener('click', () => openMappingDialog(btn.dataset.mapOpen));
+        btn.addEventListener('click', () => {
+          // 先把上一个映射弹层关掉：它的遮罩还盖着主页面，
+          // 不关的话这个按钮根本点不到（用户会以为"点了没反应"）。
+          if (mappingDialog) {
+            mappingDialog.close();
+            mappingDialog = null;
+          }
+          openMappingDialog(btn.dataset.mapOpen);
+        });
       });
       view.querySelectorAll('[data-map-clear]').forEach((btn) => {
         btn.addEventListener('click', () => {
+          if (mappingDialog) {
+            mappingDialog.close();
+            mappingDialog = null;
+          }
           const key = btn.dataset.mapClear;
           clearMapping(key);
           markDirty(true);
@@ -1684,11 +1696,18 @@ export default {
       }
       const hit = (matchInfo.matches || [])[0];
       const near = (matchInfo.candidates || {})[colKey] || [];
+      const rule = (matchInfo.names || {})[colKey] || {};
+      const effective = rule.match || [];
+      // 提示要说清"这一列到底拿什么名字去匹配的"——
+      // 带括号的列只按括号里的备注名找，没匹配上时用户才知道该去看什么。
       const hint = hit
         ? `已按「${MATCH_VIA_LABELS[hit.via] || '列名'}」匹配到 ${esc(hit.column_name || '')}${hit.via === 'alias' && hit.alias ? `（括号备注名「${esc(hit.alias)}」）` : ''}${hit.via === 'similar' ? `（相似 ${Math.round((hit.score || 0) * 100)}%，请核对）` : ''}。`
-        : near.length
-          ? '没有同名或括号备注名同名的列，下面按相似度排了候选，选一个即可。'
-          : '这些表里没有能对上的列，可以选任意一列，或清空这一列。';
+        : rule.bracketed
+          ? `这一列带括号备注，只按括号里的「${effective.map((n) => esc(n)).join('、')}」去数据源里找，源表里没有同名的列。`
+            + (near.length ? '下面是按相似度排的候选，选一个即可。' : '可以选任意一列，或清空这一列。')
+          : near.length
+            ? '没有同名或相近的列，下面按相似度排了候选，选一个即可。'
+            : '这些表里没有能对上的列，可以选任意一列，或清空这一列。';
 
       const ref = openModal({
         title: `映射「${col.name}」`,

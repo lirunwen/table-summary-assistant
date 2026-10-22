@@ -103,6 +103,10 @@ try {
     /加班 小时/.test(byKey.c4?.source || '') && /同名/.test(byKey.c4?.badge || ''),
     `${byKey.c4?.source} / ${byKey.c4?.badge}`);
   check('没有对应列的目标列显示未配置', /未配置/.test(byKey.c5?.badge || ''), byKey.c5?.badge);
+  // 括号备注优先：源表里同时有「名称」和「别名」时，「名称（别名）」必须取「别名」
+  check('带括号的列按括号里的备注名匹配，不被同名列抢走',
+    /别名/.test(byKey.c6?.source || '') && !/· 名称/.test(byKey.c6?.source || ''),
+    `${byKey.c6?.source} / ${byKey.c6?.badge}`);
 
   // --- 3. 「映射」弹层 ---
   await page.click('[data-map-open="c0"]');
