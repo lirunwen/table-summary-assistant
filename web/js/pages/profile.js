@@ -145,6 +145,10 @@ export default {
     let matchCandidates = {};
     // 当前打开的「映射」弹层：同一时间只留一个，免得两层叠在一起点错
     let mappingDialog = null;
+    // 列级错误（validate 产出，映射行直接拿来标红）
+    let currentColErrors = {};
+    // 映射表筛选：全部 / 只看没配来源的列
+    let mappingFilter = 'all';
 
     ctx.setCrumb([
       { label: '工作台', href: '#/' },
@@ -189,6 +193,8 @@ export default {
 
       let unmapped = 0;
       let invalid = 0;
+      // 列级错误：渲染映射行时直接用，用户不用去别处找"到底哪一列错了"
+      const colErrors = {};
       for (const col of cols) {
         const state = mappingState(col.key);
         if (state.formula || state.mapping?.mode === 'const') continue;
@@ -200,12 +206,14 @@ export default {
           const headers = tableHeaders(src.table_id);
           if (!headers.length) {
             errors.push(`列「${col.name}」的来源表已失效。`);
+            colErrors[col.key] = '来源表已失效，请重新选来源';
             invalid += 1;
             break;
           }
           const index = Number(src.column_index);
           if (!Number.isInteger(index) || index < 0 || index >= headers.length) {
             errors.push(`列「${col.name}」的来源字段已失效。`);
+            colErrors[col.key] = '来源字段已失效，请重新选字段';
             invalid += 1;
             break;
           }
@@ -220,7 +228,7 @@ export default {
         }
       }
       const mapped = cols.length - unmapped;
-      return { errors, warns, cols, mapped, unmapped, invalid };
+      return { errors, warns, cols, mapped, unmapped, invalid, colErrors };
     }
 
     function targetTemplate() {
@@ -237,6 +245,10 @@ export default {
     function paintSaveStatus() {
       view.querySelectorAll('[data-save-status]').forEach((el) => {
         el.innerHTML = saveStatusText();
+      });
+      // 保存失败时给一个明确的重试入口，而不是只把文字变红
+      view.querySelectorAll('[data-retry-save]').forEach((btn) => {
+        btn.hidden = saveStatus !== 'error';
       });
     }
 
@@ -615,7 +627,7 @@ export default {
               ${(config.lookups || []).map((lookup, i) => renderLookupCard(lookup, i, availableLookupIds)).join('') || `<div class="empty-inline">还没有关联表。如果所有字段都来自主表，可以跳过。</div>`}
             </div>
             ${availableLookupIds.length ? `
-              <select class="select select-sm mt-10" data-add-lookup>
+              <select class="select select-sm mt-10" data-add-lookup aria-label="添加关联表">
                 <option value="">＋ 添加关联表…</option>
                 ${availableTables().filter((entry) => availableLookupIds.includes(entry.table.id)).map((entry) => (
                   `<option value="${attr(entry.table.id)}">${esc(entry.label)} · ${fmtNumber(entry.table.row_count)} 行</option>`
@@ -642,7 +654,7 @@ export default {
         <div class="lookup-card">
           <div class="lookup-head">
             ${icon('link')}
-            <select class="select select-sm" data-lookup-table="${index}" style="flex:1;min-width:0;border-color:transparent;background-color:transparent;font-weight:600">
+            <select class="select select-sm" data-lookup-table="${index}" aria-label="关联表 ${index + 1} 使用哪张数据表" style="flex:1;min-width:0;border-color:transparent;background-color:transparent;font-weight:600">
               ${Array.from(groups.entries()).map(([group, items]) => `<optgroup label="${attr(group)}">${items.map((entry) => (
                 `<option value="${attr(entry.table.id)}" ${entry.table.id === lookup.table_id ? 'selected' : ''}>${esc(entry.label)}</option>`
               )).join('')}</optgroup>`).join('')}
@@ -661,7 +673,7 @@ export default {
                       <div class="arrow">${icon('arrow-right')}</div>
                       <div>
                         <div class="key-map-label">关联表字段</div>
-                        <select class="select select-sm" data-lookup-key="${index}" data-key-pos="${keyPos}">
+                        <select class="select select-sm" data-lookup-key="${index}" data-key-pos="${keyPos}" aria-label="关联表 ${index + 1} 的第 ${keyPos + 1} 个关联字段">
                           <option value="">请选择字段</option>
                           ${headers.map((h, hi) => `<option value="${hi}" ${Number(lookup.keys?.[keyPos]) === hi ? 'selected' : ''}>${esc(h)}</option>`).join('')}
                         </select>
@@ -741,7 +753,7 @@ export default {
               <div class="field">
                 <label class="field-label">表头行</label>
                 <div class="input-group">
-                  <input class="input" value="第 ${config.target.header_row || 1} 行" readonly>
+                  <input class="input" value="第 ${config.target.header_row || 1} 行" readonly aria-label="表头所在行（只读，点右侧调整）">
                   <button class="btn btn-secondary btn-sm" type="button" data-adjust-header>调整</button>
                 </div>
               </div>
@@ -921,8 +933,12 @@ export default {
               ${formulaCount ? `<span class="chip chip-brand">${formulaCount} 列用公式</span>` : ''}
               ${chainCount ? `<span class="chip">${chainCount} 列多来源</span>` : ''}
               ${aggCount ? `<span class="chip">${aggCount} 列做聚合</span>` : ''}
-              <span class="chip ${mapped === cols.length && cols.length ? 'chip-brand' : 'chip-gold'}">${mapped} / ${cols.length} 已配置</span>
-              <button class="btn btn-secondary btn-sm" type="button" data-auto-map>${icon('wand')}按列名匹配</button>
+              ${cols.length - mapped > 0
+                ? `<button class="chip chip-gold chip-btn" type="button" data-filter-unmatched title="只看还没配来源的列">${cols.length - mapped} 列未匹配</button>`
+                : `<span class="chip chip-brand">${mapped} / ${cols.length} 已配置</span>`}
+              ${mappingFilter === 'unmatched' ? `<button class="chip chip-btn" type="button" data-filter-all>显示全部</button>` : ''}
+              <button class="btn btn-secondary btn-sm" type="button" data-auto-map title="只给还没配来源的列按列名补上，不动已有配置">${icon('wand')}匹配空列</button>
+              <button class="btn btn-ghost btn-sm" type="button" data-auto-map-all title="把所有列按列名重配一遍（会覆盖手工配置）">全部重配…</button>
             </div>
           </div>
           ${!cols.length ? `<div class="empty-inline" style="padding:28px">先在上一步确定目标列，再来设置每一列的数据来源。</div>`
@@ -933,9 +949,12 @@ export default {
               : `<div class="map-scroll">
                   <div class="map-table">
                     <div class="map-row head">
-                      <span>目标列</span><span>来源</span><span>取值</span><span>状态</span><span>操作</span>
+                      <span>目标列</span><span>来源</span><span>取值方式</span><span>状态</span><span>操作</span>
                     </div>
-                    ${cols.map((col) => renderMappingRow(col)).join('')}
+                    ${cols
+                      .filter((col) => mappingFilter !== 'unmatched' || !mappingState(col.key).configured)
+                      .map((col) => renderMappingRow(col))
+                      .join('')}
                   </div>
                 </div>`}
           <div class="tiny faint mt-10">「映射」弹层里可以改来源、加备用来源、设处理方式与缺省值、写公式；
@@ -993,6 +1012,7 @@ export default {
 
     function renderMappingRow(col) {
       const state = mappingState(col.key);
+      const colError = currentColErrors[col.key] || '';
       const sourceText = state.formula
         ? `公式：${formulaOf(state.mapping).trim() || '（空）'}`
         : state.configured
@@ -1005,18 +1025,18 @@ export default {
       const combine = combineOf(state.mapping);
       const hasSource = state.configured;
       return `
-        <div class="map-row ${hasSource || state.formula ? '' : 'needs-attention'}" data-map-row="${attr(col.key)}">
+        <div class="map-row ${colError ? 'row-error' : (hasSource || state.formula ? '' : 'needs-attention')}" data-map-row="${attr(col.key)}" ${colError ? `title="${attr(colError)}"` : ''}>
           ${renderTargetCell(col)}
           <div class="map-source" title="${attr(sourceText)}">
             <span class="src-text ${hasSource || state.formula ? '' : 'off'}">${esc(sourceText)}</span>
             ${hasSource && combine !== 'first' ? `<span class="map-chip">${esc(COMBINE_LABELS[combine] || combine)}</span>` : ''}
           </div>
-          <div>
-            <select class="select select-sm" data-map-combine="${attr(col.key)}" title="同一主键匹配到多行时怎么合并" ${hasSource ? '' : 'disabled'}>
+          <div class="map-value-cell">
+            <select class="select select-sm" data-map-combine="${attr(col.key)}" title="同一主键匹配到多行时怎么合并" ${hasSource ? '' : 'disabled'} aria-label="取值方式：${attr(col.name)}">
               ${COMBINES.map((item) => `<option value="${item.key}" ${item.key === combine ? 'selected' : ''}>${item.label}</option>`).join('')}
             </select>
           </div>
-          <div class="map-status-cell">${matchBadge(state)}</div>
+          <div class="map-status-cell">${colError ? `<span class="map-badge error" title="${attr(colError)}">${icon('alert', 'icon-sm')}来源失效</span>` : matchBadge(state)}</div>
           <div class="map-actions">
             <button class="icon-btn" type="button" data-map-open="${attr(col.key)}" title="映射：改来源、加备用来源、设处理方式">${icon('wand')}</button>
             <button class="icon-btn" type="button" data-map-clear="${attr(col.key)}" title="清空这一列的来源" ${hasSource || state.formula ? '' : 'disabled'}>${icon('x')}</button>
@@ -1080,16 +1100,22 @@ export default {
       const scrollY = window.scrollY;
       const template = targetTemplate();
       const v = validate();
+      currentColErrors = v.colErrors || {};
       view.innerHTML = `
         <div class="editor-head">
           <button class="back-btn" type="button" data-back title="返回方案列表" aria-label="返回方案列表">${icon('arrow-left')}</button>
           <div class="editor-title-wrap">
-            <div class="editor-title-line">
+            <h1 class="editor-title-line">
               <input class="editor-title" data-name value="${attr(name)}" maxlength="80" aria-label="方案名称">
               <span class="chip ${v.errors.length ? 'chip-gold' : 'chip-brand'}">${modeLabel(config.mode)}</span>
-            </div>
+            </h1>
             <div class="editor-sub">
               <span data-save-status>${saveStatusText()}</span>
+              <button class="status-pill ${v.errors.length ? 'warn' : 'ok'}" type="button" data-open-issues
+                title="点开看待处理项">
+                ${icon(v.errors.length ? 'alert' : 'check-circle', 'icon-sm')}${v.errors.length ? `${v.errors.length} 项待处理` : '可以生成'}
+              </button>
+              <button class="status-pill danger" type="button" data-retry-save hidden>保存失败 · 点此重试</button>
               <span>·</span>
               <span>${v.cols.length} 个输出列</span>
               <span>·</span>
@@ -1122,6 +1148,54 @@ export default {
     }
 
     function bind() {
+      // 完成度状态条：点开待处理清单，逐条说明并带定位
+      view.querySelector('[data-open-issues]')?.addEventListener('click', () => {
+        const v = validate();
+        const items = [
+          ...v.errors.map((text) => ({ kind: 'error', text })),
+          ...v.warns.map((text) => ({ kind: 'warn', text })),
+        ];
+        const sectionOf = (text) => {
+          if (/模板/.test(text)) return 'section-target';
+          if (/主表|主键|关联表|合并的数据表/.test(text)) return 'section-sources';
+          return 'section-mapping';
+        };
+        const ref = openModal({
+          title: v.errors.length ? `${v.errors.length} 项需要处理` : '可以生成',
+          sub: v.errors.length ? '按顺序处理完就能生成汇总表。' : '当前配置没有阻断性问题。',
+          size: 'modal-lg',
+          body: items.length
+            ? `<div class="issue-list">${items.map((it) => `
+                <button class="issue-item ${it.kind}" type="button" data-jump="${attr(sectionOf(it.text))}">
+                  ${icon(it.kind === 'error' ? 'alert' : 'info', 'icon-sm')}
+                  <span class="flex-1">${esc(it.text)}</span>
+                  ${icon('arrow-right', 'icon-sm')}
+                </button>`).join('')}</div>`
+            : `<div class="empty-inline">没有待处理项，直接点「生成汇总表」即可。</div>`,
+          footer: `<button class="btn btn-secondary" type="button" data-close>关闭</button>`,
+        });
+        ref.modal.querySelector('[data-close]').addEventListener('click', ref.close);
+        ref.body.querySelectorAll('[data-jump]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            ref.close();
+            document.getElementById(btn.dataset.jump)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          });
+        });
+      });
+      view.querySelector('[data-retry-save]')?.addEventListener('click', async (event) => {
+        const restore = withButtonLoading(event.currentTarget, '重试中…');
+        try {
+          dirty = true;
+          await saveDraft(false);
+          toast('已重新保存。', 'ok');
+        } catch (err) {
+          toast(`还是没保存成功：${err.message || err}`, 'error', 6000);
+        } finally {
+          restore();
+          paintSaveStatus();
+        }
+      });
+
       view.querySelector('[data-back]')?.addEventListener('click', async () => {
         if (dirty) {
           try {
@@ -1352,20 +1426,62 @@ export default {
         });
       });
       view.querySelectorAll('[data-col-remove]').forEach((btn) => {
-        btn.addEventListener('click', () => {
+        btn.addEventListener('click', async () => {
           const key = btn.dataset.colRemove;
+          const col = config.target.columns.find((c) => c.key === key);
+          if (!col) return;
+          const hasMapping = !!config.mappings[key];
+          if (hasMapping) {
+            const ok = await confirmDialog({
+              title: '删除目标列',
+              message: `删除「${col.name}」后，这一列配好的来源也会一起删除。`,
+              confirmText: '删除',
+              danger: true,
+            });
+            if (!ok) return;
+          }
           config.target.columns = config.target.columns.filter((c) => c.key !== key);
           delete config.mappings[key];
           markDirty(true);
         });
       });
 
-      // 映射
+      // 只看未匹配 / 显示全部
+      view.querySelector('[data-filter-unmatched]')?.addEventListener('click', () => {
+        mappingFilter = 'unmatched';
+        paint(true);
+      });
+      view.querySelector('[data-filter-all]')?.addEventListener('click', () => {
+        mappingFilter = 'all';
+        paint(true);
+      });
+
+      // 映射：「匹配空列」只补空位（安全）；「全部重配」会覆盖手工配置，先确认
       view.querySelector('[data-auto-map]')?.addEventListener('click', async (event) => {
         const btn = event.currentTarget;
         btn.disabled = true;
         try {
-          // 手动点是明确要求：所有列按列名重配一遍（自动预匹配才只填空位）
+          const count = await autoMap({ auto: true });
+          if (count) markDirty(true);
+        } finally {
+          btn.disabled = false;
+        }
+      });
+      view.querySelector('[data-auto-map-all]')?.addEventListener('click', async (event) => {
+        const btn = event.currentTarget;
+        const configured = includedColumns(config).filter((col) => mappingState(col.key).configured).length;
+        if (configured) {
+          const ok = await confirmDialog({
+            title: '按列名重配所有列',
+            message: `当前有 ${configured} 列已经配好来源，重配会按列名覆盖它们（手工改过的也会被覆盖）。`,
+            detail: `<div class="warning-note">${icon('alert')}<span>转换方式、缺省值、取值方式会保留；来源列会被按列名重新选择。想保留手工配置，请用左边的「匹配空列」。</span></div>`,
+            confirmText: '全部重配',
+            danger: true,
+          });
+          if (!ok) return;
+        }
+        btn.disabled = true;
+        try {
           const count = await autoMap();
           if (count) markDirty(true);
         } finally {
@@ -1379,7 +1495,7 @@ export default {
       view.querySelectorAll('[data-goto-mapping]').forEach((btn) => btn.addEventListener('click', () => {
         document.getElementById('section-mapping')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }));
-      // 映射行：只有「取值」留在行内，其余操作都在弹层里
+      // 映射行：只有「取值方式」留在行内，其余操作都在弹层里
       view.querySelectorAll('[data-map-combine]').forEach((select) => {
         select.addEventListener('change', () => {
           const key = select.dataset.mapCombine;
@@ -1406,9 +1522,19 @@ export default {
             mappingDialog = null;
           }
           const key = btn.dataset.mapClear;
+          const before = config.mappings[key] ? structuredClone(config.mappings[key]) : null;
           clearMapping(key);
           markDirty(true);
-          toast('已清空这一列的来源。', 'info');
+          // 清空是可挽回的：给 5 秒撤销，不弹确认打断操作
+          toast('已清空这一列的来源。', 'info', 5000, {
+            label: '撤销',
+            onClick: () => {
+              if (before) config.mappings[key] = before;
+              else delete config.mappings[key];
+              markDirty(true);
+              toast('已恢复这一列的来源。', 'ok');
+            },
+          });
         });
       });
       view.querySelectorAll('[data-map-rules]').forEach((btn) => {
@@ -1502,9 +1628,29 @@ export default {
           </div>`;
         body.querySelector('[data-back]').addEventListener('click', renderLibrary);
           body.querySelectorAll('[data-pick-sheet]').forEach((btn) => {
-            btn.addEventListener('click', () => {
+            btn.addEventListener('click', async () => {
               const sheet = sheets.find((s) => s.name === btn.dataset.pickSheet);
               if (!sheet) return;
+              // 换模板会按新字段重建目标列：名字对不上的列，其映射会一起消失。
+              // 先算清楚丢多少条，让用户知情再换。
+              const keepNames = new Set(
+                (template.fields || []).length
+                  ? (template.fields || []).map((f) => String(f.name || '').trim())
+                  : (sheet.headers || []).map((h) => String(h || '').trim()),
+              );
+              const lost = config.target.columns.filter(
+                (col) => config.mappings[col.key] && !keepNames.has(String(col.name || '').trim()),
+              );
+              if (lost.length) {
+                const ok = await confirmDialog({
+                  title: '更换目标模板',
+                  message: `新模板里没有这 ${lost.length} 列，更换后它们的来源配置会一起丢掉。`,
+                  detail: `<div class="warning-note">${icon('alert')}<span>${lost.slice(0, 8).map((c) => esc(c.name)).join('、')}${lost.length > 8 ? '…' : ''}</span></div>`,
+                  confirmText: '仍然更换',
+                  danger: true,
+                });
+                if (!ok) return;
+              }
               applyTemplateToTarget(config, template, sheet);
               // 换了模板目标列就变了：详情复位收起，再按新列名预匹配一次
               targetDetailOpen = false;
@@ -1711,7 +1857,7 @@ export default {
 
       const ref = openModal({
         title: `映射「${col.name}」`,
-        sub: '选来源列、定处理方式；同一主键匹配到多行时用「取值」决定怎么合并。',
+        sub: '选来源列、定处理方式；同一主键匹配到多行时用「取值方式」决定怎么合并。',
         size: 'modal-lg',
         body: `
           <div class="map-hint">${icon('info')}<span>${hint}</span></div>
@@ -2323,7 +2469,17 @@ export default {
 
     paint(false);
 
+    // 有未保存的改动、或上次保存失败时，关标签页/刷新前提醒一下：
+    // 只靠 950ms 防抖自动保存，服务被关或磁盘满时改动会白做。
+    const guardUnload = (event) => {
+      if (!dirty && saveStatus !== 'error') return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', guardUnload);
+
     return () => {
+      window.removeEventListener('beforeunload', guardUnload);
       clearTimeout(saveTimer);
       if (dirty) {
         saveDraft(true).catch(() => {});

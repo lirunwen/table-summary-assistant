@@ -56,8 +56,8 @@ try {
   const before = await page.$$eval('[data-map-field]', (els) => els.length);
   check('明确留空的列不会被自动匹配填上', before === 0, `实际 ${before} 个字段下拉`);
 
-  // --- 2. 点「按列名匹配」 ---
-  await page.click('[data-auto-map]');
+  // --- 2. 点「全部重配」（主按钮「匹配空列」只补空位，不会碰用户明确留空的列） ---
+  await page.click('[data-auto-map-all]');
   await wait(1500);
 
   const picked = await page.evaluate(() => {

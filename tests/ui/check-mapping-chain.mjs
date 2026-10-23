@@ -35,29 +35,33 @@ try {
   page.on('pageerror', (e) => jsErrors.push(String(e)));
   page.on('console', (m) => { if (m.type() === 'error') jsErrors.push(m.text()); });
 
+  // 用例会改配置并自动保存，直接用 API 复位成 prep 的初始状态，
+  // 免得「每次跑都多叠一个来源」，几轮之后就没有可选项了。
+  const boot = await (await fetch(`${BASE}/api/bootstrap`)).json();
+  const prof = (boot.profiles || []).find((p) => p.id === ctx.profile_id);
+  if (prof) {
+    const cfg = prof.config;
+    cfg.mappings.c2 = {
+      mode: 'table', combine: 'first', separator: '、',
+      sources: [
+        { table_id: ctx.emp_table, column_index: 2, transform: 'direct' },
+        { table_id: ctx.det_table, column_index: 4, transform: 'direct' },
+      ],
+    };
+    cfg.mappings.c3 = {
+      mode: 'table', combine: 'sum', separator: '、',
+      sources: [{ table_id: ctx.det_table, column_index: 1, transform: 'number' }],
+    };
+    await fetch(`${BASE}/api/profiles/${ctx.profile_id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: prof.name, config: cfg }),
+    });
+  }
+
   await page.goto(`${BASE}/#/profiles/${ctx.profile_id}`, { waitUntil: 'networkidle0' });
   await page.waitForSelector('[data-map-row="c0"]', { timeout: 20000 });
   await wait(500);
-
-  // 用例会改配置并自动保存，所以先复位，保证可重复执行
-  await page.evaluate(() => {
-    const sel = document.querySelector('[data-map-combine="c3"]');
-    if (sel && sel.value !== 'sum') {
-      sel.value = 'sum';
-      sel.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-  });
-  await wait(500);
-  for (let i = 0; i < 3; i += 1) {
-    const removed = await page.evaluate(() => {
-      const x = document.querySelector('[data-chain-row="c3"] .chain-x');
-      if (!x) return false;
-      x.click();
-      return true;
-    });
-    if (!removed) break;
-    await wait(350);
-  }
 
   // --- 1. 段落顺序：数据来源 → 目标表 → 字段映射 ---
   const order = await page.evaluate(() => [...document.querySelectorAll('.section-card')]

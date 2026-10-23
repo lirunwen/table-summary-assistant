@@ -80,7 +80,13 @@ export function debounce(fn, delay = 400) {
   return wrapped;
 }
 
-export function toast(message, type = 'ok', timeout = 3800) {
+/**
+ * 轻提示。
+ *
+ * `action` 可选 `{label, onClick}`：用于「撤销」这类可挽回操作，
+ * 点了就执行回调并关闭提示。
+ */
+export function toast(message, type = 'ok', timeout = 3800, action = null) {
   const root = document.getElementById('toast-root');
   if (!root) return;
   const names = { ok: 'check-circle', error: 'alert', warn: 'alert', info: 'info' };
@@ -90,13 +96,25 @@ export function toast(message, type = 'ok', timeout = 3800) {
   el.innerHTML = `
     ${icon(names[type] || 'info')}
     <div class="flex-1">${esc(message)}</div>
+    ${action ? `<button class="toast-action" type="button">${esc(action.label)}</button>` : ''}
     <button class="toast-close" type="button" aria-label="关闭">${icon('x', 'icon-sm')}</button>`;
+  let timer = null;
   const remove = () => {
     if (!el.isConnected) return;
+    clearTimeout(timer);
     el.classList.add('leaving');
     setTimeout(() => el.remove(), 190);
   };
   el.querySelector('.toast-close').addEventListener('click', remove);
+  el.querySelector('.toast-action')?.addEventListener('click', () => {
+    try { action.onClick?.(); } finally { remove(); }
+  });
+  // 鼠标移上去就暂停自动消失，读完再走
+  if (timeout > 0) {
+    timer = setTimeout(remove, timeout + (action ? 2500 : 0));
+    el.addEventListener('mouseenter', () => clearTimeout(timer));
+    el.addEventListener('mouseleave', () => { timer = setTimeout(remove, 1200); });
+  }
   root.appendChild(el);
   while (root.children.length > 4) root.firstElementChild.remove();
   if (timeout > 0) setTimeout(remove, timeout);
@@ -145,6 +163,9 @@ export function openModal({
   )).filter((el) => el.offsetParent !== null);
 
   const onKey = (e) => {
+    // 只让**最上层**弹层响应键盘：以前每个弹层都往 document 挂 keydown，
+    // 按一次 Esc 会把「映射」和它上面的「公式」弹层一起关掉。
+    if (root.lastElementChild !== overlay) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       close();
@@ -211,6 +232,12 @@ export function confirmDialog({
     });
     ref.modal.querySelector('[data-cancel]').addEventListener('click', () => finish(false));
     ref.modal.querySelector('[data-confirm]').addEventListener('click', () => finish(true));
+    // 危险操作把初始焦点放到「取消」：openModal 默认会聚焦 .btn-primary，
+    // 而危险确认框的主按钮就是确认按钮 —— 打开后按一下回车就把数据删了。
+    if (danger) {
+      const cancel = ref.modal.querySelector('[data-cancel]');
+      if (cancel) setTimeout(() => cancel.focus(), 60);
+    }
   });
 }
 
